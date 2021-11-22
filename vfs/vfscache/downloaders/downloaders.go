@@ -2,10 +2,11 @@ package downloaders
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/asyncreader"
@@ -26,6 +27,9 @@ const (
 	backgroundKickerInterval = 5 * time.Second
 	// maximum number of errors before declaring dead
 	maxErrorCount = 10
+	// If a downloader is within this range or --buffer-size
+	// whichever is the larger, we will reuse the downloader
+	minWindow = 1024 * 1024
 )
 
 // Item is the interface that an item to download must obey
@@ -179,7 +183,7 @@ func (dls *Downloaders) _newDownloader(r ranges.Range) (dl *downloader, err erro
 	err = dl.open(dl.offset)
 	if err != nil {
 		_ = dl.close(err)
-		return nil, errors.Wrap(err, "failed to open downloader")
+		return nil, fmt.Errorf("failed to open downloader: %w", err)
 	}
 
 	dls.dls = append(dls.dls, dl)
@@ -230,7 +234,11 @@ func (dls *Downloaders) Close(inErr error) (err error) {
 		}
 	}
 	dls.cancel()
+	// dls may have entered the periodical (every 5 seconds) kickWaiters() call
+	// unlock the mutex to allow it to finish so that we can get its dls.wg.Done()
+	dls.mu.Unlock()
 	dls.wg.Wait()
+	dls.mu.Lock()
 	dls.dls = nil
 	dls._dispatchWaiters()
 	dls._closeWaiters(inErr)
@@ -279,7 +287,7 @@ func (dls *Downloaders) _ensureDownloader(r ranges.Range) (err error) {
 	// defer log.Trace(dls.src, "r=%v", r)("err=%v", &err)
 
 	// The window includes potentially unread data in the buffer
-	window := int64(fs.Config.BufferSize)
+	window := int64(fs.GetConfig(context.TODO()).BufferSize)
 
 	// Increase the read range by the read ahead if set
 	if dls.opt.ReadAhead > 0 {
@@ -294,7 +302,7 @@ func (dls *Downloaders) _ensureDownloader(r ranges.Range) (err error) {
 	r = dls.item.FindMissing(r)
 
 	// If the range is entirely present then we only need to start a
-	// dowloader if the window isn't full.
+	// downloader if the window isn't full.
 	startNew := true
 	if r.IsEmpty() {
 		// Make a new range which includes the window
@@ -323,6 +331,11 @@ func (dls *Downloaders) _ensureDownloader(r ranges.Range) (err error) {
 		r.Size = 0
 	}
 
+	// If buffer size is less than minWindow then make it that
+	if window < minWindow {
+		window = minWindow
+	}
+
 	var dl *downloader
 	// Look through downloaders to find one in range
 	// If there isn't one then start a new one
@@ -349,7 +362,7 @@ func (dls *Downloaders) _ensureDownloader(r ranges.Range) (err error) {
 	dl, err = dls._newDownloader(r)
 	if err != nil {
 		dls._countErrors(0, err)
-		return errors.Wrap(err, "failed to start downloader")
+		return fmt.Errorf("failed to start downloader: %w", err)
 	}
 	return err
 }
@@ -517,12 +530,12 @@ func (dl *downloader) open(offset int64) (err error) {
 	// if offset > 0 {
 	// 	rangeOption = &fs.RangeOption{Start: offset, End: size - 1}
 	// }
-	// in0, err := operations.NewReOpen(dl.dls.ctx, dl.dls.src, fs.Config.LowLevelRetries, dl.dls.item.c.hashOption, rangeOption)
+	// in0, err := operations.NewReOpen(dl.dls.ctx, dl.dls.src, ci.LowLevelRetries, dl.dls.item.c.hashOption, rangeOption)
 
 	in0 := chunkedreader.New(context.TODO(), dl.dls.src, int64(dl.dls.opt.ChunkSize), int64(dl.dls.opt.ChunkSizeLimit))
 	_, err = in0.Seek(offset, 0)
 	if err != nil {
-		return errors.Wrap(err, "vfs reader: failed to open source file")
+		return fmt.Errorf("vfs reader: failed to open source file: %w", err)
 	}
 	dl.in = dl.tr.Account(dl.dls.ctx, in0).WithBuffer() // account and buffer the transfer
 
@@ -538,7 +551,7 @@ func (dl *downloader) open(offset int64) (err error) {
 func (dl *downloader) close(inErr error) (err error) {
 	// defer log.Trace(dl.dls.src, "inErr=%v", err)("err=%v", &err)
 	checkErr := func(e error) {
-		if e == nil || errors.Cause(err) == asyncreader.ErrorStreamAbandoned {
+		if e == nil || errors.Is(err, asyncreader.ErrorStreamAbandoned) {
 			return
 		}
 		err = e
@@ -549,7 +562,7 @@ func (dl *downloader) close(inErr error) (err error) {
 		dl.in = nil
 	}
 	if dl.tr != nil {
-		dl.tr.Done(inErr)
+		dl.tr.Done(dl.dls.ctx, inErr)
 		dl.tr = nil
 	}
 	dl._closed = true
@@ -557,7 +570,7 @@ func (dl *downloader) close(inErr error) (err error) {
 	return nil
 }
 
-// closed returns true if the downloader has been closed alread
+// closed returns true if the downloader has been closed already
 func (dl *downloader) closed() bool {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
@@ -581,7 +594,7 @@ func (dl *downloader) _stop() {
 
 	// stop the downloader by stopping the async reader buffering
 	// any more input. This causes all the stuff in the async
-	// buffer (which can be many MB) to be written to the disk
+	// buffer (which can be many MiB) to be written to the disk
 	// before exiting.
 	if dl.in != nil {
 		dl.in.StopBuffering()
@@ -605,8 +618,8 @@ func (dl *downloader) stopAndClose(inErr error) (err error) {
 func (dl *downloader) download() (n int64, err error) {
 	// defer log.Trace(dl.dls.src, "")("err=%v", &err)
 	n, err = dl.in.WriteTo(dl)
-	if err != nil && errors.Cause(err) != asyncreader.ErrorStreamAbandoned {
-		return n, errors.Wrap(err, "vfs reader: failed to write to cache file")
+	if err != nil && !errors.Is(err, asyncreader.ErrorStreamAbandoned) {
+		return n, fmt.Errorf("vfs reader: failed to write to cache file: %w", err)
 	}
 
 	return n, nil

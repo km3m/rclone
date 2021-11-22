@@ -4,8 +4,13 @@ description: "Download rclone binaries for your OS."
 type: page
 ---
 
-Rclone Download {{< version >}}
-=====================
+# Downloads
+
+Rclone is single executable (`rclone`, or `rclone.exe` on Windows) that you can
+simply download as a zip archive and extract into a location of your choosing.
+See the [install](https://rclone.org/install/) documentation for more details.
+
+## Release {{% version %}} {#release}
 
 | Arch-OS | Windows | macOS | Linux | .deb | .rpm | FreeBSD | NetBSD | OpenBSD | Plan9 | Solaris |
 |:-------:|:-------:|:-----:|:-----:|:----:|:----:|:-------:|:------:|:-------:|:-----:|:-------:|
@@ -13,7 +18,7 @@ Rclone Download {{< version >}}
 | Intel/AMD - 32 Bit | {{< download windows 386 >}} | - | {{< download linux 386 >}} | {{< download linux 386 deb >}} | {{< download linux 386 rpm >}} | {{< download freebsd 386 >}} | {{< download netbsd 386 >}} | {{< download openbsd 386 >}} | {{< download plan9 386 >}} | - |
 | ARMv6 - 32 Bit | - | - | {{< download linux arm >}} | {{< download linux arm deb >}} | {{< download linux arm rpm >}} | {{< download freebsd arm >}} | {{< download netbsd arm >}} | - | - | - |
 | ARMv7 - 32 Bit | - | - | {{< download linux arm-v7 >}} | {{< download linux arm-v7 deb >}} | {{< download linux arm-v7 rpm >}} | {{< download freebsd arm-v7 >}} | {{< download netbsd arm-v7 >}} | - | - | - |
-| ARM - 64 Bit | - | - | {{< download linux arm64 >}} | {{< download linux arm64 deb >}} | {{< download linux arm64 rpm >}} | - | - | - | - | - |
+| ARM - 64 Bit | - | {{< download osx arm64 >}} | {{< download linux arm64 >}} | {{< download linux arm64 deb >}} | {{< download linux arm64 rpm >}} | - | - | - | - | - |
 | MIPS - Big Endian | - | - | {{< download linux mips >}} | {{< download linux mips deb >}} | {{< download linux mips rpm >}} | - | - | - | - | - |
 | MIPS - Little Endian | - | - | {{< download linux mipsle >}} | {{< download linux mipsle deb >}} | {{< download linux mipsle rpm >}} | - | - | - | - | - |
 
@@ -32,15 +37,14 @@ For beta installation, run:
 Note that this script checks the version of rclone installed first and
 won't re-download if not needed.
 
-Beta releases
-=============
+## Beta releases
 
 [Beta releases](https://beta.rclone.org) are generated from each commit
 to master.  Note these are named like
 
     {Version Tag}.beta.{Commit Number}.{Git Commit Hash}
 
-eg
+e.g.
 
     v1.53.0-beta.4677.b657a2204
 
@@ -54,7 +58,7 @@ Some beta releases may have a branch name also:
 
     {Version Tag}-beta.{Commit Number}.{Git Commit Hash}.{Branch Name}
 
-eg
+e.g.
 
     v1.53.0-beta.4677.b657a2204.semver
 
@@ -70,8 +74,7 @@ Note that [rclone.org](https://rclone.org/) is only updated on
 releases - to see the documentation for the latest beta go to
 [tip.rclone.org](https://tip.rclone.org/).
 
-Downloads for scripting
-=======================
+## Downloads for scripting
 
 If you would like to download the current version (maybe from a
 script) from a URL which doesn't change then you can use these links.
@@ -82,11 +85,10 @@ script) from a URL which doesn't change then you can use these links.
 | Intel/AMD - 32 Bit | {{< cdownload windows 386 >}} | - | {{< cdownload linux 386 >}} | {{< cdownload linux 386 deb >}} | {{< cdownload linux 386 rpm >}} | {{< cdownload freebsd 386 >}} | {{< cdownload netbsd 386 >}} | {{< cdownload openbsd 386 >}} | {{< cdownload plan9 386 >}} | - |
 | ARMv6 - 32 Bit | - | - | {{< cdownload linux arm >}} | {{< cdownload linux arm deb >}} | {{< cdownload linux arm rpm >}} | {{< cdownload freebsd arm >}} | {{< cdownload netbsd arm >}} | - | - | - |
 | ARMv7 - 32 Bit | - | - | {{< cdownload linux arm-v7 >}} | {{< cdownload linux arm-v7 deb >}} | {{< cdownload linux arm-v7 rpm >}} | {{< cdownload freebsd arm-v7 >}} | {{< cdownload netbsd arm-v7 >}} | - | - | - |
-| ARM - 64 Bit | - | - | {{< cdownload linux arm64 >}} | {{< cdownload linux arm64 deb >}} | {{< cdownload linux arm64 rpm >}} | - | - | - | - | - |
+| ARM - 64 Bit | - | {{< cdownload osx arm64 >}} | {{< cdownload linux arm64 >}} | {{< cdownload linux arm64 deb >}} | {{< cdownload linux arm64 rpm >}} | - | - | - | - | - |
 | MIPS - Big Endian | - | - | {{< cdownload linux mips >}} | {{< cdownload linux mips deb >}} | {{< cdownload linux mips rpm >}} | - | - | - | - | - |
 | MIPS - Little Endian | - | - | {{< cdownload linux mipsle >}} | {{< cdownload linux mipsle deb >}} | {{< cdownload linux mipsle rpm >}} | - | - | - | - | - |
 
-Older Downloads
-==============
+## Older Downloads
 
 Older downloads can be found [here](https://downloads.rclone.org/).

@@ -18,7 +18,7 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &listLong, "long", "", listLong, "Show the type as well as names.")
+	flags.BoolVarP(cmdFlags, &listLong, "long", "", listLong, "Show the type as well as names")
 }
 
 var commandDefinition = &cobra.Command{
@@ -41,7 +41,7 @@ When uses with the -l flag it lists the types too.
 		}
 		for _, remote := range remotes {
 			if listLong {
-				remoteType := config.FileGet(remote, "type", "UNKNOWN")
+				remoteType := config.FileGet(remote, "type")
 				fmt.Printf("%-*s %s\n", maxlen+1, remote+":", remoteType)
 			} else {
 				fmt.Printf("%s:\n", remote)

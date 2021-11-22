@@ -5,17 +5,17 @@ package writeback
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/vfs/vfscommon"
 )
 
 const (
-	maxUploadDelay = 5 * time.Minute // max delay betwen upload attempts
+	maxUploadDelay = 5 * time.Minute // max delay between upload attempts
 )
 
 // PutFn is the interface that item provides to store the data
@@ -32,7 +32,7 @@ type WriteBack struct {
 	lookup  map[Handle]*writeBackItem // for getting a *writeBackItem from a Handle - writeBackItems are in here until cancelled
 	opt     *vfscommon.Options        // VFS options
 	timer   *time.Timer               // next scheduled time for the uploader
-	expiry  time.Time                 // time the next item exires or IsZero
+	expiry  time.Time                 // time the next item expires or IsZero
 	uploads int                       // number of uploads in progress
 
 	// read and written with atomic
@@ -276,13 +276,12 @@ func (wb *WriteBack) Add(id Handle, name string, modified bool, putFn PutFn) Han
 	return wbItem.id
 }
 
-// Remove should be called when a file should be removed from the
+// _remove should be called when a file should be removed from the
 // writeback queue. This cancels a writeback if there is one and
 // doesn't return the item to the queue.
-func (wb *WriteBack) Remove(id Handle) (found bool) {
-	wb.mu.Lock()
-	defer wb.mu.Unlock()
-
+//
+// This should be called with the lock held
+func (wb *WriteBack) _remove(id Handle) (found bool) {
 	wbItem, found := wb.lookup[id]
 	if found {
 		fs.Debugf(wbItem.name, "vfs cache: cancelling writeback (uploading %v) %p item %d", wbItem.uploading, wbItem, wbItem.id)
@@ -297,6 +296,16 @@ func (wb *WriteBack) Remove(id Handle) (found bool) {
 	}
 	wb._resetTimer()
 	return found
+}
+
+// Remove should be called when a file should be removed from the
+// writeback queue. This cancels a writeback if there is one and
+// doesn't return the item to the queue.
+func (wb *WriteBack) Remove(id Handle) (found bool) {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+
+	return wb._remove(id)
 }
 
 // Rename should be called when a file might be uploading and it gains
@@ -314,6 +323,15 @@ func (wb *WriteBack) Rename(id Handle, name string) {
 		// We are uploading already so cancel the upload
 		wb._cancelUpload(wbItem)
 	}
+
+	// Check to see if there are any uploads with the existing
+	// name and remove them
+	for existingID, existingItem := range wb.lookup {
+		if existingID != id && existingItem.name == name {
+			wb._remove(existingID)
+		}
+	}
+
 	wbItem.name = name
 	// Kick the timer on
 	wb.items._update(wbItem, wb._newExpiry())
@@ -347,7 +365,7 @@ func (wb *WriteBack) upload(ctx context.Context, wbItem *writeBackItem) {
 		if wbItem.delay > maxUploadDelay {
 			wbItem.delay = maxUploadDelay
 		}
-		if _, uerr := fserrors.Cause(err); uerr == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			fs.Infof(wbItem.name, "vfs cache: upload canceled")
 			// Upload was cancelled so reset timer
 			wbItem.delay = wb.opt.WriteBack
@@ -416,7 +434,7 @@ func (wb *WriteBack) processItems(ctx context.Context) {
 	resetTimer := true
 	for wbItem := wb._peekItem(); wbItem != nil && time.Until(wbItem.expiry) <= 0; wbItem = wb._peekItem() {
 		// If reached transfer limit don't restart the timer
-		if wb.uploads >= fs.Config.Transfers {
+		if wb.uploads >= fs.GetConfig(context.TODO()).Transfers {
 			fs.Debugf(wbItem.name, "vfs cache: delaying writeback as --transfers exceeded")
 			resetTimer = false
 			break

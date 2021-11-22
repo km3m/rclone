@@ -1,3 +1,4 @@
+//go:build cmount && cgo && (linux || darwin || freebsd || windows)
 // +build cmount
 // +build cgo
 // +build linux darwin freebsd windows
@@ -9,12 +10,13 @@ import (
 	"os"
 	"path"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/billziss-gh/cgofuse/fuse"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/vfs"
 )
@@ -23,11 +25,12 @@ const fhUnset = ^uint64(0)
 
 // FS represents the top level filing system
 type FS struct {
-	VFS     *vfs.VFS
-	f       fs.Fs
-	ready   chan (struct{})
-	mu      sync.Mutex // to protect the below
-	handles []vfs.Handle
+	VFS       *vfs.VFS
+	f         fs.Fs
+	ready     chan (struct{})
+	mu        sync.Mutex // to protect the below
+	handles   []vfs.Handle
+	destroyed int32 // read/write with sync/atomic
 }
 
 // NewFS makes a new FS
@@ -187,6 +190,7 @@ func (fsys *FS) Init() {
 // Destroy call).
 func (fsys *FS) Destroy() {
 	defer log.Trace(fsys.f, "")("")
+	atomic.StoreInt32(&fsys.destroyed, 1)
 }
 
 // Getattr reads the attributes for path
@@ -270,7 +274,7 @@ func (fsys *FS) Releasedir(path string, fh uint64) (errc int) {
 	return fsys.closeHandle(fh)
 }
 
-// Statfs reads overall stats on the filessystem
+// Statfs reads overall stats on the filesystem
 func (fsys *FS) Statfs(path string, stat *fuse.Statfs_t) (errc int) {
 	defer log.Trace(path, "")("stat=%+v, errc=%d", stat, &errc)
 	const blockSize = 4096
@@ -565,7 +569,8 @@ func translateError(err error) (errc int) {
 	if err == nil {
 		return 0
 	}
-	switch errors.Cause(err) {
+	_, uErr := fserrors.Cause(err)
+	switch uErr {
 	case vfs.OK:
 		return 0
 	case vfs.ENOENT, fs.ErrorDirNotFound, fs.ErrorObjectNotFound:

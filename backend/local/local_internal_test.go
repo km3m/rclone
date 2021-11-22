@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -89,24 +88,21 @@ func TestSymlink(t *testing.T) {
 
 	// Object viewed as symlink
 	file2 := fstest.NewItem("symlink.txt"+linkSuffix, "file.txt", modTime2)
-	if runtime.GOOS == "windows" {
-		file2.Size = 0 // symlinks are 0 length under Windows
-	}
 
 	// Object viewed as destination
 	file2d := fstest.NewItem("symlink.txt", "hello", modTime1)
 
 	// Check with no symlink flags
-	fstest.CheckItems(t, r.Flocal, file1)
-	fstest.CheckItems(t, r.Fremote)
+	r.CheckLocalItems(t, file1)
+	r.CheckRemoteItems(t)
 
 	// Set fs into "-L" mode
 	f.opt.FollowSymlinks = true
 	f.opt.TranslateSymlinks = false
 	f.lstat = os.Stat
 
-	fstest.CheckItems(t, r.Flocal, file1, file2d)
-	fstest.CheckItems(t, r.Fremote)
+	r.CheckLocalItems(t, file1, file2d)
+	r.CheckRemoteItems(t)
 
 	// Set fs into "-l" mode
 	f.opt.FollowSymlinks = false
@@ -115,18 +111,15 @@ func TestSymlink(t *testing.T) {
 
 	fstest.CheckListingWithPrecision(t, r.Flocal, []fstest.Item{file1, file2}, nil, fs.ModTimeNotSupported)
 	if haveLChtimes {
-		fstest.CheckItems(t, r.Flocal, file1, file2)
+		r.CheckLocalItems(t, file1, file2)
 	}
 
 	// Create a symlink
 	modTime3 := fstest.Time("2002-03-03T04:05:10.123123123Z")
 	file3 := r.WriteObjectTo(ctx, r.Flocal, "symlink2.txt"+linkSuffix, "file.txt", modTime3, false)
-	if runtime.GOOS == "windows" {
-		file3.Size = 0 // symlinks are 0 length under Windows
-	}
 	fstest.CheckListingWithPrecision(t, r.Flocal, []fstest.Item{file1, file2, file3}, nil, fs.ModTimeNotSupported)
 	if haveLChtimes {
-		fstest.CheckItems(t, r.Flocal, file1, file2, file3)
+		r.CheckLocalItems(t, file1, file2, file3)
 	}
 
 	// Check it got the correct contents
@@ -142,9 +135,7 @@ func TestSymlink(t *testing.T) {
 	o, err := r.Flocal.NewObject(ctx, "symlink2.txt"+linkSuffix)
 	require.NoError(t, err)
 	assert.Equal(t, "symlink2.txt"+linkSuffix, o.Remote())
-	if runtime.GOOS != "windows" {
-		assert.Equal(t, int64(8), o.Size())
-	}
+	assert.Equal(t, int64(8), o.Size())
 
 	// Check that NewObject doesn't see the non suffixed version
 	_, err = r.Flocal.NewObject(ctx, "symlink2.txt")
@@ -172,6 +163,6 @@ func TestSymlinkError(t *testing.T) {
 		"links":      "true",
 		"copy_links": "true",
 	}
-	_, err := NewFs("local", "/", m)
+	_, err := NewFs(context.Background(), "local", "/", m)
 	assert.Equal(t, errLinksAndCopyLinks, err)
 }

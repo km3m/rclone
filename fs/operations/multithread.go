@@ -2,9 +2,10 @@ package operations
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"golang.org/x/sync/errgroup"
@@ -18,15 +19,17 @@ const (
 
 // Return a boolean as to whether we should use multi thread copy for
 // this transfer
-func doMultiThreadCopy(f fs.Fs, src fs.Object) bool {
+func doMultiThreadCopy(ctx context.Context, f fs.Fs, src fs.Object) bool {
+	ci := fs.GetConfig(ctx)
+
 	// Disable multi thread if...
 
 	// ...it isn't configured
-	if fs.Config.MultiThreadStreams <= 1 {
+	if ci.MultiThreadStreams <= 1 {
 		return false
 	}
 	// ...size of object is less than cutoff
-	if src.Size() < int64(fs.Config.MultiThreadCutoff) {
+	if src.Size() < int64(ci.MultiThreadCutoff) {
 		return false
 	}
 	// ...source doesn't support it
@@ -36,7 +39,7 @@ func doMultiThreadCopy(f fs.Fs, src fs.Object) bool {
 	}
 	// ...if --multi-thread-streams not in use and source and
 	// destination are both local
-	if !fs.Config.MultiThreadSet && dstFeatures.IsLocal && src.Fs().Features().IsLocal {
+	if !ci.MultiThreadSet && dstFeatures.IsLocal && src.Fs().Features().IsLocal {
 		return false
 	}
 	return true
@@ -55,6 +58,7 @@ type multiThreadCopyState struct {
 
 // Copy a single stream into place
 func (mc *multiThreadCopyState) copyStream(ctx context.Context, stream int) (err error) {
+	ci := fs.GetConfig(ctx)
 	defer func() {
 		if err != nil {
 			fs.Debugf(mc.src, "multi-thread copy: stream %d/%d failed: %v", stream+1, mc.streams, err)
@@ -71,9 +75,9 @@ func (mc *multiThreadCopyState) copyStream(ctx context.Context, stream int) (err
 
 	fs.Debugf(mc.src, "multi-thread copy: stream %d/%d (%d-%d) size %v starting", stream+1, mc.streams, start, end, fs.SizeSuffix(end-start))
 
-	rc, err := NewReOpen(ctx, mc.src, fs.Config.LowLevelRetries, &fs.RangeOption{Start: start, End: end - 1})
+	rc, err := NewReOpen(ctx, mc.src, ci.LowLevelRetries, &fs.RangeOption{Start: start, End: end - 1})
 	if err != nil {
-		return errors.Wrap(err, "multpart copy: failed to open source")
+		return fmt.Errorf("multipart copy: failed to open source: %w", err)
 	}
 	defer fs.CheckClose(rc, &err)
 
@@ -89,29 +93,29 @@ func (mc *multiThreadCopyState) copyStream(ctx context.Context, stream int) (err
 		if nr > 0 {
 			err = mc.acc.AccountRead(nr)
 			if err != nil {
-				return errors.Wrap(err, "multpart copy: accounting failed")
+				return fmt.Errorf("multipart copy: accounting failed: %w", err)
 			}
 			nw, ew := mc.wc.WriteAt(buf[0:nr], offset)
 			if nw > 0 {
 				offset += int64(nw)
 			}
 			if ew != nil {
-				return errors.Wrap(ew, "multpart copy: write failed")
+				return fmt.Errorf("multipart copy: write failed: %w", ew)
 			}
 			if nr != nw {
-				return errors.Wrap(io.ErrShortWrite, "multpart copy")
+				return fmt.Errorf("multipart copy: %w", io.ErrShortWrite)
 			}
 		}
 		if er != nil {
 			if er != io.EOF {
-				return errors.Wrap(er, "multpart copy: read failed")
+				return fmt.Errorf("multipart copy: read failed: %w", er)
 			}
 			break
 		}
 	}
 
 	if offset != end {
-		return errors.Errorf("multpart copy: wrote %d bytes but expected to write %d", offset-start, end-start)
+		return fmt.Errorf("multipart copy: wrote %d bytes but expected to write %d", offset-start, end-start)
 	}
 
 	fs.Debugf(mc.src, "multi-thread copy: stream %d/%d (%d-%d) size %v finished", stream+1, mc.streams, start, end, fs.SizeSuffix(end-start))
@@ -163,7 +167,7 @@ func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object,
 	// create write file handle
 	mc.wc, err = openWriterAt(gCtx, remote, mc.size)
 	if err != nil {
-		return nil, errors.Wrap(err, "multpart copy: failed to open destination")
+		return nil, fmt.Errorf("multipart copy: failed to open destination: %w", err)
 	}
 
 	fs.Debugf(src, "Starting multi-thread copy with %d parts of size %v", mc.streams, fs.SizeSuffix(mc.partSize))
@@ -179,19 +183,19 @@ func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object,
 		return nil, err
 	}
 	if closeErr != nil {
-		return nil, errors.Wrap(closeErr, "multi-thread copy: failed to close object after copy")
+		return nil, fmt.Errorf("multi-thread copy: failed to close object after copy: %w", closeErr)
 	}
 
 	obj, err := f.NewObject(ctx, remote)
 	if err != nil {
-		return nil, errors.Wrap(err, "multi-thread copy: failed to find object after copy")
+		return nil, fmt.Errorf("multi-thread copy: failed to find object after copy: %w", err)
 	}
 
 	err = obj.SetModTime(ctx, src.ModTime(ctx))
 	switch err {
 	case nil, fs.ErrorCantSetModTime, fs.ErrorCantSetModTimeWithoutDelete:
 	default:
-		return nil, errors.Wrap(err, "multi-thread copy: failed to set modification time")
+		return nil, fmt.Errorf("multi-thread copy: failed to set modification time: %w", err)
 	}
 
 	fs.Debugf(src, "Finished multi-thread copy with %d parts of size %v", mc.streams, fs.SizeSuffix(mc.partSize))

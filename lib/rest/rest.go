@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
@@ -15,7 +17,6 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/lib/readers"
 )
@@ -51,9 +52,9 @@ func ReadBody(resp *http.Response) (result []byte, err error) {
 func defaultErrorHandler(resp *http.Response) (err error) {
 	body, err := ReadBody(resp)
 	if err != nil {
-		return errors.Wrap(err, "error reading error out of body")
+		return fmt.Errorf("error reading error out of body: %w", err)
 	}
-	return errors.Errorf("HTTP error %v (%v) returned body: %q", resp.StatusCode, resp.Status, body)
+	return fmt.Errorf("HTTP error %v (%v) returned body: %q", resp.StatusCode, resp.Status, body)
 }
 
 // SetErrorHandler sets the handler to decode an error response when
@@ -124,9 +125,9 @@ func (api *Client) SetCookie(cks ...*http.Cookie) *Client {
 	return api
 }
 
-// Opts contains parameters for Call, CallJSON etc
+// Opts contains parameters for Call, CallJSON, etc.
 type Opts struct {
-	Method                string // GET, POST etc
+	Method                string // GET, POST, etc.
 	Path                  string // relative to RootURL
 	RootURL               string // override RootURL passed into SetRoot()
 	Body                  io.Reader
@@ -213,11 +214,10 @@ func (api *Client) Call(ctx context.Context, opts *Opts) (resp *http.Response, e
 	if opts.ContentLength != nil && *opts.ContentLength == 0 {
 		body = nil
 	}
-	req, err := http.NewRequest(opts.Method, url, body)
+	req, err := http.NewRequestWithContext(ctx, opts.Method, url, body)
 	if err != nil {
 		return
 	}
-	req = req.WithContext(ctx) // go1.13 can use NewRequestWithContext
 	headers := make(map[string]string)
 	// Set default headers
 	for k, v := range api.headers {
@@ -273,7 +273,7 @@ func (api *Client) Call(ctx context.Context, opts *Opts) (resp *http.Response, e
 		err = api.signer(req)
 		api.mu.RLock()
 		if err != nil {
-			return nil, errors.Wrap(err, "signer failed")
+			return nil, fmt.Errorf("signer failed: %w", err)
 		}
 	}
 	api.mu.RUnlock()
@@ -287,7 +287,7 @@ func (api *Client) Call(ctx context.Context, opts *Opts) (resp *http.Response, e
 			err = api.errorHandler(resp)
 			if err.Error() == "" {
 				// replace empty errors with something
-				err = errors.Errorf("http error %d: %v", resp.StatusCode, resp.Status)
+				err = fmt.Errorf("http error %d: %v", resp.StatusCode, resp.Status)
 			}
 			return resp, err
 		}
@@ -309,7 +309,7 @@ func (api *Client) Call(ctx context.Context, opts *Opts) (resp *http.Response, e
 // the int64 returned is the overhead in addition to the file contents, in case Content-Length is required
 //
 // NB This doesn't allow setting the content type of the attachment
-func MultipartUpload(in io.Reader, params url.Values, contentName, fileName string) (io.ReadCloser, string, int64, error) {
+func MultipartUpload(ctx context.Context, in io.Reader, params url.Values, contentName, fileName string) (io.ReadCloser, string, int64, error) {
 	bodyReader, bodyWriter := io.Pipe()
 	writer := multipart.NewWriter(bodyWriter)
 	contentType := writer.FormDataContentType()
@@ -344,15 +344,28 @@ func MultipartUpload(in io.Reader, params url.Values, contentName, fileName stri
 
 	multipartLength := int64(buf.Len())
 
+	// Make sure we close the pipe writer to release the reader on context cancel
+	quit := make(chan struct{})
+	go func() {
+		select {
+		case <-quit:
+			break
+		case <-ctx.Done():
+			_ = bodyWriter.CloseWithError(ctx.Err())
+		}
+	}()
+
 	// Pump the data in the background
 	go func() {
+		defer close(quit)
+
 		var err error
 
 		for key, vals := range params {
 			for _, val := range vals {
 				err = writer.WriteField(key, val)
 				if err != nil {
-					_ = bodyWriter.CloseWithError(errors.Wrap(err, "create metadata part"))
+					_ = bodyWriter.CloseWithError(fmt.Errorf("create metadata part: %w", err))
 					return
 				}
 			}
@@ -361,20 +374,20 @@ func MultipartUpload(in io.Reader, params url.Values, contentName, fileName stri
 		if in != nil {
 			part, err := writer.CreateFormFile(contentName, fileName)
 			if err != nil {
-				_ = bodyWriter.CloseWithError(errors.Wrap(err, "failed to create form file"))
+				_ = bodyWriter.CloseWithError(fmt.Errorf("failed to create form file: %w", err))
 				return
 			}
 
 			_, err = io.Copy(part, in)
 			if err != nil {
-				_ = bodyWriter.CloseWithError(errors.Wrap(err, "failed to copy data"))
+				_ = bodyWriter.CloseWithError(fmt.Errorf("failed to copy data: %w", err))
 				return
 			}
 		}
 
 		err = writer.Close()
 		if err != nil {
-			_ = bodyWriter.CloseWithError(errors.Wrap(err, "failed to close form"))
+			_ = bodyWriter.CloseWithError(fmt.Errorf("failed to close form: %w", err))
 			return
 		}
 
@@ -453,7 +466,7 @@ func (api *Client) callCodec(ctx context.Context, opts *Opts, request interface{
 		opts = opts.Copy()
 
 		var overhead int64
-		opts.Body, opts.ContentType, overhead, err = MultipartUpload(opts.Body, params, opts.MultipartContentName, opts.MultipartFileName)
+		opts.Body, opts.ContentType, overhead, err = MultipartUpload(ctx, opts.Body, params, opts.MultipartContentName, opts.MultipartFileName)
 		if err != nil {
 			return nil, err
 		}

@@ -19,7 +19,7 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &recurse, "recursive", "R", false, "Recurse into the listing.")
+	flags.BoolVarP(cmdFlags, &recurse, "recursive", "R", false, "Recurse into the listing")
 }
 
 var commandDefinition = &cobra.Command{
@@ -49,9 +49,10 @@ If you just want the directory names use "rclone lsf --dirs-only".
 
 ` + lshelp.Help,
 	Run: func(command *cobra.Command, args []string) {
+		ci := fs.GetConfig(context.Background())
 		cmd.CheckArgs(1, 1, command, args)
 		if recurse {
-			fs.Config.MaxDepth = 0
+			ci.MaxDepth = 0
 		}
 		fsrc := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {

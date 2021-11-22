@@ -30,9 +30,11 @@ Here are the keys - press '?' to toggle the help on and off
      ←,h to return
      c toggle counts
      g toggle graph
-     n,s,C sort by name,size,count
+     a toggle average size in directory
+     u toggle human-readable format
+     n,s,C,A sort by name,size,count,average size
      d delete file/directory
-     y copy current path to clipbard
+     y copy current path to clipboard
      Y display current path
      ^L refresh screen
      ? to toggle help on and off

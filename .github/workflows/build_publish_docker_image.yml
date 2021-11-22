@@ -7,6 +7,7 @@ on:
 
 jobs:
     build:
+        if: github.repository == 'rclone/rclone'
         runs-on: ubuntu-latest
         name: Build image job
         steps:
@@ -15,7 +16,7 @@ jobs:
               with:
                 fetch-depth: 0
             - name: Build and publish image
-              uses: ilteoood/docker_buildx@439099796bfc03dd9cedeb72a0c7cb92be5cc92c
+              uses: ilteoood/docker_buildx@1.1.0
               with:
                 tag: beta
                 imageName: rclone/rclone

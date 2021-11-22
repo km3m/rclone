@@ -3,6 +3,8 @@ package webdav
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -11,13 +13,12 @@ import (
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/cmd/serve/httplib"
 	"github.com/rclone/rclone/cmd/serve/httplib/httpflags"
-	"github.com/rclone/rclone/cmd/serve/httplib/serve"
 	"github.com/rclone/rclone/cmd/serve/proxy"
 	"github.com/rclone/rclone/cmd/serve/proxy/proxyflags"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/lib/errors"
+	"github.com/rclone/rclone/lib/http/serve"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfsflags"
 	"github.com/spf13/cobra"
@@ -84,7 +85,7 @@ Use "rclone hashsum" to see the full list.
 			fs.Debugf(f, "Using hash %v for ETag", hashType)
 		}
 		cmd.Run(false, false, command, func() error {
-			s := newWebDAV(f, &httpflags.Opt)
+			s := newWebDAV(context.Background(), f, &httpflags.Opt)
 			err := s.serve()
 			if err != nil {
 				return err
@@ -114,18 +115,20 @@ type WebDAV struct {
 	_vfs          *vfs.VFS // don't use directly, use getVFS
 	webdavhandler *webdav.Handler
 	proxy         *proxy.Proxy
+	ctx           context.Context // for global config
 }
 
 // check interface
 var _ webdav.FileSystem = (*WebDAV)(nil)
 
 // Make a new WebDAV to serve the remote
-func newWebDAV(f fs.Fs, opt *httplib.Options) *WebDAV {
+func newWebDAV(ctx context.Context, f fs.Fs, opt *httplib.Options) *WebDAV {
 	w := &WebDAV{
-		f: f,
+		f:   f,
+		ctx: ctx,
 	}
 	if proxyflags.Opt.AuthProxy != "" {
-		w.proxy = proxy.New(&proxyflags.Opt)
+		w.proxy = proxy.New(ctx, &proxyflags.Opt)
 		// override auth
 		copyOpt := *opt
 		copyOpt.Auth = w.auth
@@ -155,7 +158,7 @@ func (w *WebDAV) getVFS(ctx context.Context) (VFS *vfs.VFS, err error) {
 	}
 	VFS, ok := value.(*vfs.VFS)
 	if !ok {
-		return nil, errors.Errorf("context value is not VFS: %#v", value)
+		return nil, fmt.Errorf("context value is not VFS: %#v", value)
 	}
 	return VFS, nil
 }

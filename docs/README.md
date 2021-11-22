@@ -1,11 +1,11 @@
 # Docs
 
-This directory tree is uses to build all the different docs for
+This directory tree is used to build all the different docs for
 rclone.
 
 See the `content` directory for the docs in markdown format.
 
-Note that some of the docs are auto generated - these should have a DO
+Note that some of the docs are auto-generated - these should have a DO
 NOT EDIT marker near the top.
 
 Use [hugo](https://github.com/spf13/hugo) to build the website.
@@ -28,7 +28,7 @@ so it is easy to tweak stuff.
 ├── config.json                   - hugo config file
 ├── content                       - docs and backend docs
 │   ├── _index.md                 - the front page of rclone.org
-│   ├── commands                  - auto generated command docs - DO NOT EDIT
+│   ├── commands                  - auto-generated command docs - DO NOT EDIT
 ├── i18n
 │   └── en.toml                   - hugo multilingual config
 ├── layouts                       - how the markdown gets converted into HTML
@@ -37,7 +37,7 @@ so it is easy to tweak stuff.
 │   │   ├── footer.copyright.html - copyright footer
 │   │   ├── footer.html           - footer including scripts
 │   │   ├── header.html           - the whole html header
-│   │   ├── header.includes.html  - header includes eg css files
+│   │   ├── header.includes.html  - header includes e.g. css files
 │   │   ├── menu.html             - left hand side menu
 │   │   ├── meta.html             - meta tags for the header
 │   │   └── navbar.html           - top navigation bar

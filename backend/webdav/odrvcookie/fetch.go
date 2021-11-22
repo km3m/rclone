@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/fshttp"
 	"golang.org/x/net/publicsuffix"
@@ -122,12 +121,12 @@ func (ca *CookieAuth) Cookies(ctx context.Context) (*CookieResponse, error) {
 func (ca *CookieAuth) getSPCookie(conf *SharepointSuccessResponse) (*CookieResponse, error) {
 	spRoot, err := url.Parse(ca.endpoint)
 	if err != nil {
-		return nil, errors.Wrap(err, "Error while constructing endpoint URL")
+		return nil, fmt.Errorf("error while constructing endpoint URL: %w", err)
 	}
 
-	u, err := url.Parse("https://" + spRoot.Host + "/_forms/default.aspx?wa=wsignin1.0")
+	u, err := url.Parse(spRoot.Scheme + "://" + spRoot.Host + "/_forms/default.aspx?wa=wsignin1.0")
 	if err != nil {
-		return nil, errors.Wrap(err, "Error while constructing login URL")
+		return nil, fmt.Errorf("error while constructing login URL: %w", err)
 	}
 
 	// To authenticate with davfs or anything else we need two cookies (rtFa and FedAuth)
@@ -143,7 +142,7 @@ func (ca *CookieAuth) getSPCookie(conf *SharepointSuccessResponse) (*CookieRespo
 
 	// Send the previously acquired Token as a Post parameter
 	if _, err = client.Post(u.String(), "text/xml", strings.NewReader(conf.Body.Token)); err != nil {
-		return nil, errors.Wrap(err, "Error while grabbing cookies from endpoint: %v")
+		return nil, fmt.Errorf("error while grabbing cookies from endpoint: %w", err)
 	}
 
 	cookieResponse := CookieResponse{}
@@ -171,21 +170,20 @@ func (ca *CookieAuth) getSPToken(ctx context.Context) (conf *SharepointSuccessRe
 
 	buf := &bytes.Buffer{}
 	if err := t.Execute(buf, reqData); err != nil {
-		return nil, errors.Wrap(err, "Error while filling auth token template")
+		return nil, fmt.Errorf("error while filling auth token template: %w", err)
 	}
 
 	// Create and execute the first request which returns an auth token for the sharepoint service
 	// With this token we can authenticate on the login page and save the returned cookies
-	req, err := http.NewRequest("POST", "https://login.microsoftonline.com/extSTS.srf", buf)
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://login.microsoftonline.com/extSTS.srf", buf)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx) // go1.13 can use NewRequestWithContext
 
-	client := fshttp.NewClient(fs.Config)
+	client := fshttp.NewClient(ctx)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, errors.Wrap(err, "Error while logging in to endpoint")
+		return nil, fmt.Errorf("error while logging in to endpoint: %w", err)
 	}
 	defer fs.CheckClose(resp.Body, &err)
 
@@ -210,7 +208,7 @@ func (ca *CookieAuth) getSPToken(ctx context.Context) (conf *SharepointSuccessRe
 	}
 
 	if err != nil {
-		return nil, errors.Wrap(err, "Error while reading endpoint response")
+		return nil, fmt.Errorf("error while reading endpoint response: %w", err)
 	}
 	return
 }

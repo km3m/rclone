@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"math"
 	"path"
@@ -11,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
+	"github.com/rclone/rclone/fs/fspath"
 )
 
 var (
@@ -52,7 +54,7 @@ type Object struct {
 	f *Fs
 }
 
-// Entry describe a warpped fs.DirEntry interface with the
+// Entry describe a wrapped fs.DirEntry interface with the
 // information of upstream Fs
 type Entry interface {
 	fs.DirEntry
@@ -61,13 +63,13 @@ type Entry interface {
 
 // New creates a new Fs based on the
 // string formatted `type:root_path(:ro/:nc)`
-func New(remote, root string, cacheTime time.Duration) (*Fs, error) {
-	_, configName, fsPath, err := fs.ParseRemote(remote)
+func New(ctx context.Context, remote, root string, cacheTime time.Duration) (*Fs, error) {
+	configName, fsPath, err := fspath.SplitFs(remote)
 	if err != nil {
 		return nil, err
 	}
 	f := &Fs{
-		RootPath:    root,
+		RootPath:    strings.TrimRight(root, "/"),
 		writable:    true,
 		creatable:   true,
 		cacheExpiry: time.Now().Unix(),
@@ -83,16 +85,14 @@ func New(remote, root string, cacheTime time.Duration) (*Fs, error) {
 		f.creatable = false
 		fsPath = fsPath[0 : len(fsPath)-3]
 	}
-	if configName != "local" {
-		fsPath = configName + ":" + fsPath
-	}
-	rFs, err := cache.Get(fsPath)
+	remote = configName + fsPath
+	rFs, err := cache.Get(ctx, remote)
 	if err != nil && err != fs.ErrorIsFile {
 		return nil, err
 	}
 	f.RootFs = rFs
-	rootString := path.Join(fsPath, filepath.ToSlash(root))
-	myFs, err := cache.Get(rootString)
+	rootString := path.Join(remote, filepath.ToSlash(root))
+	myFs, err := cache.Get(ctx, rootString)
 	if err != nil && err != fs.ErrorIsFile {
 		return nil, err
 	}
@@ -134,7 +134,7 @@ func (f *Fs) WrapEntry(e fs.DirEntry) (Entry, error) {
 	case fs.Directory:
 		return f.WrapDirectory(e.(fs.Directory)), nil
 	default:
-		return nil, errors.Errorf("unknown object type %T", e)
+		return nil, fmt.Errorf("unknown object type %T", e)
 	}
 }
 
@@ -336,7 +336,7 @@ func (f *Fs) updateUsageCore(lock bool) error {
 	usage, err := f.RootFs.Features().About(ctx)
 	if err != nil {
 		f.cacheUpdate = false
-		if errors.Cause(err) == fs.ErrorDirNotFound {
+		if errors.Is(err, fs.ErrorDirNotFound) {
 			err = nil
 		}
 		return err

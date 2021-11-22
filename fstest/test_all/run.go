@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"go/build"
 	"io"
@@ -35,16 +36,18 @@ var (
 // if retries are needed.
 type Run struct {
 	// Config
-	Remote    string // name of the test remote
-	Backend   string // name of the backend
-	Path      string // path to the source directory
-	FastList  bool   // add -fast-list to tests
-	Short     bool   // add -short
-	NoRetries bool   // don't retry if set
-	OneOnly   bool   // only run test for this backend at once
-	NoBinary  bool   // set to not build a binary
-	SizeLimit int64  // maximum test file size
-	Ignore    map[string]struct{}
+	Remote      string // name of the test remote
+	Backend     string // name of the backend
+	Path        string // path to the source directory
+	FastList    bool   // add -fast-list to tests
+	Short       bool   // add -short
+	NoRetries   bool   // don't retry if set
+	OneOnly     bool   // only run test for this backend at once
+	NoBinary    bool   // set to not build a binary
+	SizeLimit   int64  // maximum test file size
+	Ignore      map[string]struct{}
+	ListRetries int     // -list-retries if > 0
+	ExtraTime   float64 // multiply the timeout by this
 	// Internals
 	CmdLine     []string
 	CmdString   string
@@ -335,14 +338,23 @@ func (r *Run) Init() {
 	} else {
 		r.CmdLine = []string{"./" + r.BinaryName()}
 	}
-	r.CmdLine = append(r.CmdLine, prefix+"v", prefix+"timeout", timeout.String(), "-remote", r.Remote)
-	if *listRetries > 0 {
-		r.CmdLine = append(r.CmdLine, "-list-retries", fmt.Sprint(*listRetries))
+	testTimeout := *timeout
+	if r.ExtraTime > 0 {
+		testTimeout = time.Duration(float64(testTimeout) * r.ExtraTime)
+	}
+	r.CmdLine = append(r.CmdLine, prefix+"v", prefix+"timeout", testTimeout.String(), "-remote", r.Remote)
+	listRetries := *listRetries
+	if r.ListRetries > 0 {
+		listRetries = r.ListRetries
+	}
+	if listRetries > 0 {
+		r.CmdLine = append(r.CmdLine, "-list-retries", fmt.Sprint(listRetries))
 	}
 	r.Try = 1
+	ci := fs.GetConfig(context.Background())
 	if *verbose {
 		r.CmdLine = append(r.CmdLine, "-verbose")
-		fs.Config.LogLevel = fs.LogLevelDebug
+		ci.LogLevel = fs.LogLevelDebug
 	}
 	if *runOnly != "" {
 		r.CmdLine = append(r.CmdLine, prefix+"run", *runOnly)

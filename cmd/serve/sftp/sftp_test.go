@@ -3,11 +3,13 @@
 //
 // We skip tests on platforms with troublesome character mappings
 
-//+build !windows,!darwin,!plan9
+//go:build !windows && !darwin && !plan9
+// +build !windows,!darwin,!plan9
 
 package sftp
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -44,7 +46,7 @@ func TestSftp(t *testing.T) {
 		opt.User = testUser
 		opt.Pass = testPass
 
-		w := newServer(f, &opt)
+		w := newServer(context.Background(), f, &opt)
 		require.NoError(t, w.serve())
 
 		// Read the host and port we started on

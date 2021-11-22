@@ -1,5 +1,10 @@
 package fichier
 
+// FileInfoRequest is the request structure of the corresponding request
+type FileInfoRequest struct {
+	URL string `json:"url"`
+}
+
 // ListFolderRequest is the request structure of the corresponding request
 type ListFolderRequest struct {
 	FolderID int `json:"folder_id"`
@@ -14,6 +19,7 @@ type ListFilesRequest struct {
 type DownloadRequest struct {
 	URL    string `json:"url"`
 	Single int    `json:"single"`
+	Pass   string `json:"pass,omitempty"`
 }
 
 // RemoveFolderRequest is the request structure of the corresponding request
@@ -47,6 +53,65 @@ type MakeFolderRequest struct {
 type MakeFolderResponse struct {
 	Name     string `json:"name"`
 	FolderID int    `json:"folder_id"`
+}
+
+// MoveFileRequest is the request structure of the corresponding request
+type MoveFileRequest struct {
+	URLs     []string `json:"urls"`
+	FolderID int      `json:"destination_folder_id"`
+	Rename   string   `json:"rename,omitempty"`
+}
+
+// MoveFileResponse is the response structure of the corresponding request
+type MoveFileResponse struct {
+	Status  string   `json:"status"`
+	Message string   `json:"message"`
+	URLs    []string `json:"urls"`
+}
+
+// CopyFileRequest is the request structure of the corresponding request
+type CopyFileRequest struct {
+	URLs     []string `json:"urls"`
+	FolderID int      `json:"folder_id"`
+	Rename   string   `json:"rename,omitempty"`
+}
+
+// CopyFileResponse is the response structure of the corresponding request
+type CopyFileResponse struct {
+	Status  string     `json:"status"`
+	Message string     `json:"message"`
+	Copied  int        `json:"copied"`
+	URLs    []FileCopy `json:"urls"`
+}
+
+// FileCopy is used in the the CopyFileResponse
+type FileCopy struct {
+	FromURL string `json:"from_url"`
+	ToURL   string `json:"to_url"`
+}
+
+// RenameFileURL is the data structure to rename a single file
+type RenameFileURL struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+}
+
+// RenameFileRequest is the request structure of the corresponding request
+type RenameFileRequest struct {
+	URLs   []RenameFileURL `json:"urls"`
+	Pretty int             `json:"pretty"`
+}
+
+// RenameFileResponse is the response structure of the corresponding request
+type RenameFileResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Renamed int    `json:"renamed"`
+	URLs    []struct {
+		URL         string `json:"url"`
+		OldFilename string `json:"old_filename"`
+		NewFilename string `json:"new_filename"`
+	} `json:"urls"`
 }
 
 // GetUploadNodeResponse is the response structure of the corresponding request
@@ -86,7 +151,6 @@ type EndFileUploadResponse struct {
 
 // File is the structure how 1Fichier returns a File
 type File struct {
-	ACL         int    `json:"acl"`
 	CDN         int    `json:"cdn"`
 	Checksum    string `json:"checksum"`
 	ContentType string `json:"content-type"`

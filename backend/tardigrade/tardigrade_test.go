@@ -1,4 +1,5 @@
-// +build go1.13,!plan9
+//go:build !plan9
+// +build !plan9
 
 // Test Tardigrade filesystem interface
 package tardigrade_test

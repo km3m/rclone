@@ -32,6 +32,7 @@ type Options struct {
 	ReadWait          time.Duration // time to wait for in-sequence read
 	WriteBack         time.Duration // time to wait before writing back dirty files
 	ReadAhead         fs.SizeSuffix // bytes to read ahead in cache mode "full"
+	UsedIsSize        bool          // if true, use the `rclone size` algorithm for Used size
 }
 
 // DefaultOpt is the default values uses for Opt
@@ -50,12 +51,13 @@ var DefaultOpt = Options{
 	CacheMode:         CacheModeOff,
 	CacheMaxAge:       3600 * time.Second,
 	CachePollInterval: 60 * time.Second,
-	ChunkSize:         128 * fs.MebiByte,
+	ChunkSize:         128 * fs.Mebi,
 	ChunkSizeLimit:    -1,
 	CacheMaxSize:      -1,
 	CaseInsensitive:   runtime.GOOS == "windows" || runtime.GOOS == "darwin", // default to true on Windows and Mac, false otherwise
 	WriteWait:         1000 * time.Millisecond,
 	ReadWait:          20 * time.Millisecond,
 	WriteBack:         5 * time.Second,
-	ReadAhead:         0 * fs.MebiByte,
+	ReadAhead:         0 * fs.Mebi,
+	UsedIsSize:        false,
 }

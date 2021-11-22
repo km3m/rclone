@@ -1,11 +1,15 @@
 package rcd
 
 import (
+	"context"
 	"log"
+	"sync"
 
+	sysdnotify "github.com/iguanesolutions/go-systemd/v5/notify"
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/fs/rc/rcflags"
 	"github.com/rclone/rclone/fs/rc/rcserver"
+	"github.com/rclone/rclone/lib/atexit"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +43,7 @@ See the [rc documentation](/rc/) for more info on the rc flags.
 			rcflags.Opt.Files = args[0]
 		}
 
-		s, err := rcserver.Start(&rcflags.Opt)
+		s, err := rcserver.Start(context.Background(), &rcflags.Opt)
 		if err != nil {
 			log.Fatalf("Failed to start remote control: %v", err)
 		}
@@ -47,6 +51,22 @@ See the [rc documentation](/rc/) for more info on the rc flags.
 			log.Fatal("rc server not configured")
 		}
 
+		// Notify stopping on exit
+		var finaliseOnce sync.Once
+		finalise := func() {
+			finaliseOnce.Do(func() {
+				_ = sysdnotify.Stopping()
+			})
+		}
+		fnHandle := atexit.Register(finalise)
+		defer atexit.Unregister(fnHandle)
+
+		// Notify ready to systemd
+		if err := sysdnotify.Ready(); err != nil {
+			log.Fatalf("failed to notify ready to systemd: %v", err)
+		}
+
 		s.Wait()
+		finalise()
 	},
 }

@@ -20,9 +20,12 @@ backends:
  - backend:  "b2"
    remote:   "TestB2:"
    fastlist: true
+   listretries: 5
  - backend:  "crypt"
    remote:   "TestCryptDrive:"
    fastlist: true
+   ignore:
+     - TestCopyFileMaxTransfer
  - backend:  "crypt"
    remote:   "TestCryptSwift:"
    fastlist: false
@@ -41,15 +44,17 @@ backends:
    remote:   "TestChunkerChunk3bNometaLocal:"
    fastlist: true
    maxfile:  6k
- # Disable chunker with mailru tests until Mailru is fixed - see
- # https://github.com/rclone/rclone/issues/4376
- # - backend:  "chunker"
- #   remote:   "TestChunkerMailru:"
- #   fastlist: true
- # - backend:  "chunker"
- #   remote:   "TestChunkerChunk50bMailru:"
- #   fastlist: true
- #   maxfile:  10k
+ - backend:  "chunker"
+   remote:   "TestChunkerChunk3bNoRenameLocal:"
+   fastlist: true
+   maxfile:  6k
+ - backend:  "chunker"
+   remote:   "TestChunkerMailru:"
+   fastlist: true
+ - backend:  "chunker"
+   remote:   "TestChunkerChunk50bMailru:"
+   fastlist: true
+   maxfile:  10k
  - backend:  "chunker"
    remote:   "TestChunkerChunk50bYandex:"
    fastlist: true
@@ -74,6 +79,10 @@ backends:
    fastlist: true
    maxfile:  1k
  - backend:  "chunker"
+   remote:   "TestChunkerOverCrypt:"
+   fastlist: true
+   maxfile:  6k
+ - backend:  "chunker"
    remote:   "TestChunkerChunk50bMD5QuickS3:"
    fastlist: true
    maxfile:  1k
@@ -82,12 +91,38 @@ backends:
    fastlist: true
    maxfile:  1k
  ## end chunker
+ ## begin compress
+ - backend:  "compress"
+   remote:   "TestCompress:"
+   fastlist: false
+ - backend:  "compress"
+   remote:   "TestCompressSwift:"
+   fastlist: false
+ - backend:  "compress"
+   remote:   "TestCompressDrive:"
+   fastlist: false
+ - backend:  "compress"
+   remote:   "TestCompressS3:"
+   fastlist: false
+## end compress
  - backend:  "drive"
    remote:   "TestDrive:"
    fastlist: true
+   ignore:
+     # Test with CutoffModeHard does not result in ErrorMaxTransferLimitReachedFatal
+     # because googleapi replaces it with a non-fatal error
+     - TestCopyFileMaxTransfer
  - backend:  "dropbox"
    remote:   "TestDropbox:"
    fastlist: false
+   ignore:
+     # This test doesn't work on a standard dropbox account because it
+     # tries to set the expiry of the link
+     - TestIntegration/FsMkdir/FsPutFiles/PublicLink
+ - backend:  "filefabric"
+   remote:   "TestFileFabric:"
+   fastlist: false
+   extratime: 2.0
  - backend:  "googlecloudstorage"
    remote:   "TestGoogleCloudStorage:"
    fastlist: true
@@ -106,6 +141,16 @@ backends:
    fastlist: true
  - backend:  "onedrive"
    remote:   "TestOneDrive:"
+   fastlist: false
+   ignore:
+     # This test doesn't work on a standard Onedrive account returning
+     # accessDenied: accountUpgradeRequired: Account Upgrade is required for this operation.
+     - TestIntegration/FsMkdir/FsPutFiles/PublicLink
+ - backend:  "onedrive"
+   remote:   "TestOneDriveBusiness:"
+   fastlist: false
+ - backend:  "onedrive"
+   remote:   "TestOneDriveCn:"
    fastlist: false
  - backend:  "s3"
    remote:   "TestS3:"
@@ -144,12 +189,12 @@ backends:
  #   ignore:
  #     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
  #     - TestIntegration/FsMkdir/FsPutFiles/SetTier
- - backend:  "s3"
-   remote:   "TestS3Ceph:"
-   fastlist: true
-   ignore:
-     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
-     - TestIntegration/FsMkdir/FsPutFiles/SetTier
+ # - backend:  "s3"
+ #   remote:   "TestS3Ceph:"
+ #   fastlist: true
+ #   ignore:
+ #     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
+ #     - TestIntegration/FsMkdir/FsPutFiles/SetTier
  - backend:  "s3"
    remote:   "TestS3Alibaba:"
    fastlist: true
@@ -158,6 +203,9 @@ backends:
    fastlist: false
  - backend:  "sftp"
    remote:   "TestSFTPRclone:"
+   fastlist: false
+ - backend:  "sftp"
+   remote:   "TestSFTPRsyncNet:"
    fastlist: false
  - backend:  "sugarsync"
    remote:   "TestSugarSync:Test"
@@ -170,28 +218,22 @@ backends:
  - backend:  "swift"
    remote:   "TestSwift:"
    fastlist: true
- - backend:  "swift"
-   remote:   "TestSwiftCeph:"
-   fastlist: true
-   ignore:
-     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
+ # - backend:  "swift"
+ #   remote:   "TestSwiftCeph:"
+ #   fastlist: true
+ #   ignore:
+ #     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
  - backend:  "yandex"
    remote:   "TestYandex:"
    fastlist: false
  - backend:  "ftp"
    remote:   "TestFTPProftpd:"
-   ignore:
-     - TestIntegration/FsMkdir/FsEncoding/punctuation
    fastlist: false
- # - backend:  "ftp"
- #   remote:   "TestFTPVsftpd:"
- #   ignore:
- #     - TestIntegration/FsMkdir/FsEncoding/punctuation
- #   fastlist: false
  - backend:  "ftp"
    remote:   "TestFTPPureftpd:"
-   ignore:
-     - TestIntegration/FsMkdir/FsEncoding/punctuation
+   fastlist: false
+ - backend:  "ftp"
+   remote:   "TestFTPVsftpd:"
    fastlist: false
  - backend:  "ftp"
    remote:   "TestFTPRclone:"
@@ -206,6 +248,7 @@ backends:
  - backend:  "fichier"
    remote:   "TestFichier:"
    fastlist: false
+   listretries: 5
    tests:
      - backend
  - backend:  "qingstor"
@@ -213,6 +256,9 @@ backends:
    fastlist: false
    oneonly:  true
    cleanup:  true
+   ignore:
+     # This test fails because of a broken bucket in the account!
+     - TestIntegration/FsMkdir/FsPutFiles/FromRoot/ListR
  - backend:  "azureblob"
    remote:   "TestAzureBlob:"
    fastlist: true
@@ -264,8 +310,12 @@ backends:
  - backend:  "putio"
    remote:   "TestPutio:"
    fastlist: false
+   extratime: 2.0
  - backend:  "sharefile"
    remote:   "TestSharefile:"
+   fastlist: false
+ - backend:  "sia"
+   remote:   "TestSia:"
    fastlist: false
  - backend:  "mailru"
    remote:   "TestMailru:"
@@ -282,6 +332,22 @@ backends:
  - backend:  "seafile"
    remote:   "TestSeafileEncrypted:"
    fastlist: true
+ - backend:  "sia"
+   remote:   "TestSia:"
+   fastlist: false
  - backend:  "tardigrade"
    remote:   "TestTardigrade:"
    fastlist: true
+ - backend:  "zoho"
+   remote:   "TestZoho:"
+   fastlist: false
+ - backend: "hdfs"
+   remote: "TestHdfs:"
+   fastlist: false
+   ignore:
+     - TestSyncUTFNorm
+ - backend: "uptobox"
+   remote: "TestUptobox:"
+   fastlist: false
+   ignore:
+     - TestRWFileHandleWriteNoWrite

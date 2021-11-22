@@ -3,14 +3,16 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -27,7 +29,7 @@ var Help = strings.Replace(`
 If you supply the parameter |--auth-proxy /path/to/program| then
 rclone will use that program to generate backends on the fly which
 then are used to authenticate incoming requests.  This uses a simple
-JSON based protocl with input on STDIN and output on STDOUT.
+JSON based protocol with input on STDIN and output on STDOUT.
 
 **PLEASE NOTE:** |--auth-proxy| and |--authorized-keys| cannot be used
 together, if |--auth-proxy| is set the authorized keys option will be
@@ -118,6 +120,7 @@ var DefaultOpt = Options{
 type Proxy struct {
 	cmdLine  []string // broken down command line
 	vfsCache *libcache.Cache
+	ctx      context.Context // for global config
 	Opt      Options
 }
 
@@ -128,8 +131,9 @@ type cacheEntry struct {
 }
 
 // New creates a new proxy with the Options passed in
-func New(opt *Options) *Proxy {
+func New(ctx context.Context, opt *Options) *Proxy {
 	return &Proxy{
+		ctx:      ctx,
 		Opt:      *opt,
 		cmdLine:  strings.Fields(opt.AuthProxy),
 		vfsCache: libcache.New(),
@@ -141,7 +145,7 @@ func (p *Proxy) run(in map[string]string) (config configmap.Simple, err error) {
 	cmd := exec.Command(p.cmdLine[0], p.cmdLine[1:]...)
 	inBytes, err := json.MarshalIndent(in, "", "\t")
 	if err != nil {
-		return nil, errors.Wrap(err, "Proxy.Call failed to marshal input: %v")
+		return nil, fmt.Errorf("proxy: failed to marshal input: %w", err)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdin = bytes.NewBuffer(inBytes)
@@ -152,11 +156,11 @@ func (p *Proxy) run(in map[string]string) (config configmap.Simple, err error) {
 	fs.Debugf(nil, "Calling proxy %v", p.cmdLine)
 	duration := time.Since(start)
 	if err != nil {
-		return nil, errors.Wrapf(err, "proxy: failed on %v: %q", p.cmdLine, strings.TrimSpace(string(stderr.Bytes())))
+		return nil, fmt.Errorf("proxy: failed on %v: %q: %w", p.cmdLine, strings.TrimSpace(string(stderr.Bytes())), err)
 	}
 	err = json.Unmarshal(stdout.Bytes(), &config)
 	if err != nil {
-		return nil, errors.Wrapf(err, "proxy: failed to read output: %q", string(stdout.Bytes()))
+		return nil, fmt.Errorf("proxy: failed to read output: %q: %w", string(stdout.Bytes()), err)
 	}
 	fs.Debugf(nil, "Proxy returned in %v", duration)
 
@@ -168,7 +172,7 @@ func (p *Proxy) run(in map[string]string) (config configmap.Simple, err error) {
 			if ok {
 				obscuredValue, err := obscure.Obscure(value)
 				if err != nil {
-					return nil, errors.Wrap(err, "proxy")
+					return nil, fmt.Errorf("proxy: %w", err)
 				}
 				config.Set(key, obscuredValue)
 			}
@@ -210,7 +214,7 @@ func (p *Proxy) call(user, auth string, isPublicKey bool) (value interface{}, er
 	// Find the backend
 	fsInfo, err := fs.Find(fsName)
 	if err != nil {
-		return nil, errors.Wrapf(err, "proxy: couldn't find backend for %q", fsName)
+		return nil, fmt.Errorf("proxy: couldn't find backend for %q: %w", fsName, err)
 	}
 
 	// base name of config on user name.  This may appear in logs
@@ -220,7 +224,7 @@ func (p *Proxy) call(user, auth string, isPublicKey bool) (value interface{}, er
 	// Look for fs in the VFS cache
 	value, err = p.vfsCache.Get(user, func(key string) (value interface{}, ok bool, err error) {
 		// Create the Fs from the cache
-		f, err := cache.GetFn(fsString, func(fsString string) (fs.Fs, error) {
+		f, err := cache.GetFn(p.ctx, fsString, func(ctx context.Context, fsString string) (fs.Fs, error) {
 			// Update the config with the default values
 			for i := range fsInfo.Options {
 				o := &fsInfo.Options[i]
@@ -228,7 +232,7 @@ func (p *Proxy) call(user, auth string, isPublicKey bool) (value interface{}, er
 					config.Set(o.Name, o.String())
 				}
 			}
-			return fsInfo.NewFs(name, root, config)
+			return fsInfo.NewFs(ctx, name, root, config)
 		})
 		if err != nil {
 			return nil, false, err
@@ -244,7 +248,7 @@ func (p *Proxy) call(user, auth string, isPublicKey bool) (value interface{}, er
 		return entry, true, nil
 	})
 	if err != nil {
-		return nil, errors.Wrapf(err, "proxy: failed to create backend")
+		return nil, fmt.Errorf("proxy: failed to create backend: %w", err)
 	}
 	return value, nil
 }
@@ -266,7 +270,7 @@ func (p *Proxy) Call(user, auth string, isPublicKey bool) (VFS *vfs.VFS, vfsKey 
 	// check we got what we were expecting
 	entry, ok := value.(cacheEntry)
 	if !ok {
-		return nil, "", errors.Errorf("proxy: value is not cache entry: %#v", value)
+		return nil, "", fmt.Errorf("proxy: value is not cache entry: %#v", value)
 	}
 
 	// Check the password / public key is correct in the cached entry.  This

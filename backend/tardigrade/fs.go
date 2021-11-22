@@ -1,18 +1,18 @@
-// +build go1.13,!plan9
+//go:build !plan9
+// +build !plan9
 
 // Package tardigrade provides an interface to Tardigrade decentralized object storage.
 package tardigrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"path"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -42,19 +42,19 @@ func init() {
 		Name:        "tardigrade",
 		Description: "Tardigrade Decentralized Cloud Storage",
 		NewFs:       NewFs,
-		Config: func(name string, configMapper configmap.Mapper) {
-			provider, _ := configMapper.Get(fs.ConfigProvider)
+		Config: func(ctx context.Context, name string, m configmap.Mapper, configIn fs.ConfigIn) (*fs.ConfigOut, error) {
+			provider, _ := m.Get(fs.ConfigProvider)
 
 			config.FileDeleteKey(name, fs.ConfigProvider)
 
 			if provider == newProvider {
-				satelliteString, _ := configMapper.Get("satellite_address")
-				apiKey, _ := configMapper.Get("api_key")
-				passphrase, _ := configMapper.Get("passphrase")
+				satelliteString, _ := m.Get("satellite_address")
+				apiKey, _ := m.Get("api_key")
+				passphrase, _ := m.Get("passphrase")
 
 				// satelliteString contains always default and passphrase can be empty
 				if apiKey == "" {
-					return
+					return nil, nil
 				}
 
 				satellite, found := satMap[satelliteString]
@@ -64,22 +64,23 @@ func init() {
 
 				access, err := uplink.RequestAccessWithPassphrase(context.TODO(), satellite, apiKey, passphrase)
 				if err != nil {
-					log.Fatalf("Couldn't create access grant: %v", err)
+					return nil, fmt.Errorf("couldn't create access grant: %w", err)
 				}
 
-				serialziedAccess, err := access.Serialize()
+				serializedAccess, err := access.Serialize()
 				if err != nil {
-					log.Fatalf("Couldn't serialize access grant: %v", err)
+					return nil, fmt.Errorf("couldn't serialize access grant: %w", err)
 				}
-				configMapper.Set("satellite_address", satellite)
-				configMapper.Set("access_grant", serialziedAccess)
+				m.Set("satellite_address", satellite)
+				m.Set("access_grant", serializedAccess)
 			} else if provider == existingProvider {
 				config.FileDeleteKey(name, "satellite_address")
 				config.FileDeleteKey(name, "api_key")
 				config.FileDeleteKey(name, "passphrase")
 			} else {
-				log.Fatalf("Invalid provider type: %s", provider)
+				return nil, fmt.Errorf("invalid provider type: %s", provider)
 			}
+			return nil, nil
 		},
 		Options: []fs.Option{
 			{
@@ -97,13 +98,13 @@ func init() {
 				}},
 			{
 				Name:     "access_grant",
-				Help:     "Access Grant.",
+				Help:     "Access grant.",
 				Required: false,
 				Provider: "existing",
 			},
 			{
 				Name:     "satellite_address",
-				Help:     "Satellite Address. Custom satellite address should match the format: `<nodeid>@<address>:<port>`.",
+				Help:     "Satellite address.\n\nCustom satellite address should match the format: `<nodeid>@<address>:<port>`.",
 				Required: false,
 				Provider: newProvider,
 				Default:  "us-central-1.tardigrade.io",
@@ -121,13 +122,13 @@ func init() {
 			},
 			{
 				Name:     "api_key",
-				Help:     "API Key.",
+				Help:     "API key.",
 				Required: false,
 				Provider: newProvider,
 			},
 			{
 				Name:     "passphrase",
-				Help:     "Encryption Passphrase. To access existing objects enter passphrase used for uploading.",
+				Help:     "Encryption passphrase.\n\nTo access existing objects enter passphrase used for uploading.",
 				Required: false,
 				Provider: newProvider,
 			},
@@ -165,9 +166,7 @@ var (
 )
 
 // NewFs creates a filesystem backed by Tardigrade.
-func NewFs(name, root string, m configmap.Mapper) (_ fs.Fs, err error) {
-	ctx := context.Background()
-
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (_ fs.Fs, err error) {
 	// Setup filesystem and connection to Tardigrade
 	root = norm.NFC.String(root)
 	root = strings.Trim(root, "/")
@@ -189,24 +188,24 @@ func NewFs(name, root string, m configmap.Mapper) (_ fs.Fs, err error) {
 	if f.opts.Access != "" {
 		access, err = uplink.ParseAccess(f.opts.Access)
 		if err != nil {
-			return nil, errors.Wrap(err, "tardigrade: access")
+			return nil, fmt.Errorf("tardigrade: access: %w", err)
 		}
 	}
 
 	if access == nil && f.opts.SatelliteAddress != "" && f.opts.APIKey != "" && f.opts.Passphrase != "" {
 		access, err = uplink.RequestAccessWithPassphrase(ctx, f.opts.SatelliteAddress, f.opts.APIKey, f.opts.Passphrase)
 		if err != nil {
-			return nil, errors.Wrap(err, "tardigrade: access")
+			return nil, fmt.Errorf("tardigrade: access: %w", err)
 		}
 
 		serializedAccess, err := access.Serialize()
 		if err != nil {
-			return nil, errors.Wrap(err, "tardigrade: access")
+			return nil, fmt.Errorf("tardigrade: access: %w", err)
 		}
 
 		err = config.SetValueAndSave(f.name, "access_grant", serializedAccess)
 		if err != nil {
-			return nil, errors.Wrap(err, "tardigrade: access")
+			return nil, fmt.Errorf("tardigrade: access: %w", err)
 		}
 	}
 
@@ -219,7 +218,7 @@ func NewFs(name, root string, m configmap.Mapper) (_ fs.Fs, err error) {
 	f.features = (&fs.Features{
 		BucketBased:       true,
 		BucketBasedRootOK: true,
-	}).Fill(f)
+	}).Fill(ctx, f)
 
 	project, err := f.connect(ctx)
 	if err != nil {
@@ -238,7 +237,7 @@ func NewFs(name, root string, m configmap.Mapper) (_ fs.Fs, err error) {
 		if bucketName != "" && bucketPath != "" {
 			_, err = project.StatBucket(ctx, bucketName)
 			if err != nil {
-				return f, errors.Wrap(err, "tardigrade: bucket")
+				return f, fmt.Errorf("tardigrade: bucket: %w", err)
 			}
 
 			object, err := project.StatObject(ctx, bucketName, bucketPath)
@@ -275,7 +274,7 @@ func (f *Fs) connect(ctx context.Context) (project *uplink.Project, err error) {
 
 	project, err = cfg.OpenProject(ctx, f.access)
 	if err != nil {
-		return nil, errors.Wrap(err, "tardigrade: project")
+		return nil, fmt.Errorf("tardigrade: project: %w", err)
 	}
 
 	return

@@ -4,10 +4,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"regexp"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/fs/operations"
@@ -20,7 +20,7 @@ var MatchTestRemote = regexp.MustCompile(`^rclone-test-[abcdefghijklmnopqrstuvwx
 
 // cleanFs runs a single clean fs for left over directories
 func cleanFs(ctx context.Context, remote string, cleanup bool) error {
-	f, err := fs.NewFs(remote)
+	f, err := fs.NewFs(context.Background(), remote)
 	if err != nil {
 		return err
 	}
@@ -46,16 +46,16 @@ func cleanFs(ctx context.Context, remote string, cleanup bool) error {
 				return nil
 			}
 			log.Printf("Purging %s", fullPath)
-			dir, err := fs.NewFs(fullPath)
+			dir, err := fs.NewFs(context.Background(), fullPath)
 			if err != nil {
-				err = errors.Wrap(err, "NewFs failed")
+				err = fmt.Errorf("NewFs failed: %w", err)
 				lastErr = err
 				fs.Errorf(fullPath, "%v", err)
 				return nil
 			}
 			err = operations.Purge(ctx, dir, "")
 			if err != nil {
-				err = errors.Wrap(err, "Purge failed")
+				err = fmt.Errorf("Purge failed: %w", err)
 				lastErr = err
 				fs.Errorf(dir, "%v", err)
 				return nil

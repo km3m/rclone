@@ -7,17 +7,21 @@ import (
 	gocipher "crypto/cipher"
 	"crypto/rand"
 	"encoding/base32"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
-	"github.com/pkg/errors"
+	"github.com/Max-Sum/base32768"
 	"github.com/rclone/rclone/backend/crypt/pkcs7"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/lib/version"
 	"github.com/rfjakob/eme"
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/scrypt"
@@ -92,12 +96,12 @@ func NewNameEncryptionMode(s string) (mode NameEncryptionMode, err error) {
 	case "obfuscate":
 		mode = NameEncryptionObfuscated
 	default:
-		err = errors.Errorf("Unknown file name encryption mode %q", s)
+		err = fmt.Errorf("Unknown file name encryption mode %q", s)
 	}
 	return mode, err
 }
 
-// String turns mode into a human readable string
+// String turns mode into a human-readable string
 func (mode NameEncryptionMode) String() (out string) {
 	switch mode {
 	case NameEncryptionOff:
@@ -112,6 +116,57 @@ func (mode NameEncryptionMode) String() (out string) {
 	return out
 }
 
+// fileNameEncoding are the encoding methods dealing with encrypted file names
+type fileNameEncoding interface {
+	EncodeToString(src []byte) string
+	DecodeString(s string) ([]byte, error)
+}
+
+// caseInsensitiveBase32Encoding defines a file name encoding
+// using a modified version of standard base32 as described in
+// RFC4648
+//
+// The standard encoding is modified in two ways
+//  * it becomes lower case (no-one likes upper case filenames!)
+//  * we strip the padding character `=`
+type caseInsensitiveBase32Encoding struct{}
+
+// EncodeToString encodes a strign using the modified version of
+// base32 encoding.
+func (caseInsensitiveBase32Encoding) EncodeToString(src []byte) string {
+	encoded := base32.HexEncoding.EncodeToString(src)
+	encoded = strings.TrimRight(encoded, "=")
+	return strings.ToLower(encoded)
+}
+
+// DecodeString decodes a string as encoded by EncodeToString
+func (caseInsensitiveBase32Encoding) DecodeString(s string) ([]byte, error) {
+	if strings.HasSuffix(s, "=") {
+		return nil, ErrorBadBase32Encoding
+	}
+	// First figure out how many padding characters to add
+	roundUpToMultipleOf8 := (len(s) + 7) &^ 7
+	equals := roundUpToMultipleOf8 - len(s)
+	s = strings.ToUpper(s) + "========"[:equals]
+	return base32.HexEncoding.DecodeString(s)
+}
+
+// NewNameEncoding creates a NameEncoding from a string
+func NewNameEncoding(s string) (enc fileNameEncoding, err error) {
+	s = strings.ToLower(s)
+	switch s {
+	case "base32":
+		enc = caseInsensitiveBase32Encoding{}
+	case "base64":
+		enc = base64.RawURLEncoding
+	case "base32768":
+		enc = base32768.SafeEncoding
+	default:
+		err = fmt.Errorf("Unknown file name encoding mode %q", s)
+	}
+	return enc, err
+}
+
 // Cipher defines an encoding and decoding cipher for the crypt backend
 type Cipher struct {
 	dataKey        [32]byte                  // Key for secretbox
@@ -119,15 +174,17 @@ type Cipher struct {
 	nameTweak      [nameCipherBlockSize]byte // used to tweak the name crypto
 	block          gocipher.Block
 	mode           NameEncryptionMode
+	fileNameEnc    fileNameEncoding
 	buffers        sync.Pool // encrypt/decrypt buffers
 	cryptoRand     io.Reader // read crypto random numbers from here
 	dirNameEncrypt bool
 }
 
 // newCipher initialises the cipher.  If salt is "" then it uses a built in salt val
-func newCipher(mode NameEncryptionMode, password, salt string, dirNameEncrypt bool) (*Cipher, error) {
+func newCipher(mode NameEncryptionMode, password, salt string, dirNameEncrypt bool, enc fileNameEncoding) (*Cipher, error) {
 	c := &Cipher{
 		mode:           mode,
+		fileNameEnc:    enc,
 		cryptoRand:     rand.Reader,
 		dirNameEncrypt: dirNameEncrypt,
 	}
@@ -147,7 +204,7 @@ func newCipher(mode NameEncryptionMode, password, salt string, dirNameEncrypt bo
 // If salt is "" we use a fixed salt just to make attackers lives
 // slighty harder than using no salt.
 //
-// Note that empty passsword makes all 0x00 keys which is used in the
+// Note that empty password makes all 0x00 keys which is used in the
 // tests.
 func (c *Cipher) Key(password, salt string) (err error) {
 	const keySize = len(c.dataKey) + len(c.nameKey) + len(c.nameTweak)
@@ -185,30 +242,6 @@ func (c *Cipher) putBlock(buf []byte) {
 	c.buffers.Put(buf)
 }
 
-// encodeFileName encodes a filename using a modified version of
-// standard base32 as described in RFC4648
-//
-// The standard encoding is modified in two ways
-//  * it becomes lower case (no-one likes upper case filenames!)
-//  * we strip the padding character `=`
-func encodeFileName(in []byte) string {
-	encoded := base32.HexEncoding.EncodeToString(in)
-	encoded = strings.TrimRight(encoded, "=")
-	return strings.ToLower(encoded)
-}
-
-// decodeFileName decodes a filename as encoded by encodeFileName
-func decodeFileName(in string) ([]byte, error) {
-	if strings.HasSuffix(in, "=") {
-		return nil, ErrorBadBase32Encoding
-	}
-	// First figure out how many padding characters to add
-	roundUpToMultipleOf8 := (len(in) + 7) &^ 7
-	equals := roundUpToMultipleOf8 - len(in)
-	in = strings.ToUpper(in) + "========"[:equals]
-	return base32.HexEncoding.DecodeString(in)
-}
-
 // encryptSegment encrypts a path segment
 //
 // This uses EME with AES
@@ -229,7 +262,7 @@ func (c *Cipher) encryptSegment(plaintext string) string {
 	}
 	paddedPlaintext := pkcs7.Pad(nameCipherBlockSize, []byte(plaintext))
 	ciphertext := eme.Transform(c.block, c.nameTweak[:], paddedPlaintext, eme.DirectionEncrypt)
-	return encodeFileName(ciphertext)
+	return c.fileNameEnc.EncodeToString(ciphertext)
 }
 
 // decryptSegment decrypts a path segment
@@ -237,7 +270,7 @@ func (c *Cipher) decryptSegment(ciphertext string) (string, error) {
 	if ciphertext == "" {
 		return "", nil
 	}
-	rawCiphertext, err := decodeFileName(ciphertext)
+	rawCiphertext, err := c.fileNameEnc.DecodeString(ciphertext)
 	if err != nil {
 		return "", err
 	}
@@ -442,10 +475,31 @@ func (c *Cipher) encryptFileName(in string) string {
 		if !c.dirNameEncrypt && i != (len(segments)-1) {
 			continue
 		}
+
+		// Strip version string so that only the non-versioned part
+		// of the file name gets encrypted/obfuscated
+		hasVersion := false
+		var t time.Time
+		if i == (len(segments)-1) && version.Match(segments[i]) {
+			var s string
+			t, s = version.Remove(segments[i])
+			// version.Remove can fail, in which case it returns segments[i]
+			if s != segments[i] {
+				segments[i] = s
+				hasVersion = true
+			}
+		}
+
 		if c.mode == NameEncryptionStandard {
 			segments[i] = c.encryptSegment(segments[i])
 		} else {
 			segments[i] = c.obfuscateSegment(segments[i])
+		}
+
+		// Add back a version to the encrypted/obfuscated
+		// file name, if we stripped it off earlier
+		if hasVersion {
+			segments[i] = version.Add(segments[i], t)
 		}
 	}
 	return strings.Join(segments, "/")
@@ -477,6 +531,21 @@ func (c *Cipher) decryptFileName(in string) (string, error) {
 		if !c.dirNameEncrypt && i != (len(segments)-1) {
 			continue
 		}
+
+		// Strip version string so that only the non-versioned part
+		// of the file name gets decrypted/deobfuscated
+		hasVersion := false
+		var t time.Time
+		if i == (len(segments)-1) && version.Match(segments[i]) {
+			var s string
+			t, s = version.Remove(segments[i])
+			// version.Remove can fail, in which case it returns segments[i]
+			if s != segments[i] {
+				segments[i] = s
+				hasVersion = true
+			}
+		}
+
 		if c.mode == NameEncryptionStandard {
 			segments[i], err = c.decryptSegment(segments[i])
 		} else {
@@ -486,6 +555,12 @@ func (c *Cipher) decryptFileName(in string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
+		// Add back a version to the decrypted/deobfuscated
+		// file name, if we stripped it off earlier
+		if hasVersion {
+			segments[i] = version.Add(segments[i], t)
+		}
 	}
 	return strings.Join(segments, "/"), nil
 }
@@ -494,10 +569,18 @@ func (c *Cipher) decryptFileName(in string) (string, error) {
 func (c *Cipher) DecryptFileName(in string) (string, error) {
 	if c.mode == NameEncryptionOff {
 		remainingLength := len(in) - len(encryptedSuffix)
-		if remainingLength > 0 && strings.HasSuffix(in, encryptedSuffix) {
-			return in[:remainingLength], nil
+		if remainingLength == 0 || !strings.HasSuffix(in, encryptedSuffix) {
+			return "", ErrorNotAnEncryptedFile
 		}
-		return "", ErrorNotAnEncryptedFile
+		decrypted := in[:remainingLength]
+		if version.Match(decrypted) {
+			_, unversioned := version.Remove(decrypted)
+			if unversioned == "" {
+				return "", ErrorNotAnEncryptedFile
+			}
+		}
+		// Leave the version string on, if it was there
+		return decrypted, nil
 	}
 	return c.decryptFileName(in)
 }
@@ -528,7 +611,7 @@ func (n *nonce) pointer() *[fileNonceSize]byte {
 func (n *nonce) fromReader(in io.Reader) error {
 	read, err := io.ReadFull(in, (*n)[:])
 	if read != fileNonceSize {
-		return errors.Wrap(err, "short read of nonce")
+		return fmt.Errorf("short read of nonce: %w", err)
 	}
 	return nil
 }
@@ -633,11 +716,8 @@ func (fh *encrypter) Read(p []byte) (n int, err error) {
 		}
 		// possibly err != nil here, but we will process the
 		// data and the next call to ReadFull will return 0, err
-		// Write nonce to start of block
-		copy(fh.buf, fh.nonce[:])
 		// Encrypt the block using the nonce
-		block := fh.buf
-		secretbox.Seal(block[:0], readBuf[:n], fh.nonce.pointer(), &fh.c.dataKey)
+		secretbox.Seal(fh.buf[:0], readBuf[:n], fh.nonce.pointer(), &fh.c.dataKey)
 		fh.bufIndex = 0
 		fh.bufSize = blockHeaderSize + n
 		fh.nonce.increment()
@@ -782,8 +862,7 @@ func (fh *decrypter) fillBuffer() (err error) {
 		return ErrorEncryptedFileBadHeader
 	}
 	// Decrypt the block using the nonce
-	block := fh.buf
-	_, ok := secretbox.Open(block[:0], readBuf[:n], fh.nonce.pointer(), &fh.c.dataKey)
+	_, ok := secretbox.Open(fh.buf[:0], readBuf[:n], fh.nonce.pointer(), &fh.c.dataKey)
 	if !ok {
 		if err != nil {
 			return err // return pending error as it is likely more accurate
@@ -908,7 +987,7 @@ func (fh *decrypter) RangeSeek(ctx context.Context, offset int64, whence int, li
 		// Re-open the underlying object with the offset given
 		rc, err := fh.open(ctx, underlyingOffset, underlyingLimit)
 		if err != nil {
-			return 0, fh.finish(errors.Wrap(err, "couldn't reopen file with offset and limit"))
+			return 0, fh.finish(fmt.Errorf("couldn't reopen file with offset and limit: %w", err))
 		}
 
 		// Set the file handle

@@ -5,6 +5,7 @@ package webgui
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -15,23 +16,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/lib/file"
 )
 
 // GetLatestReleaseURL returns the latest release details of the rclone-webui-react
 func GetLatestReleaseURL(fetchURL string) (string, string, int, error) {
 	resp, err := http.Get(fetchURL)
 	if err != nil {
-		return "", "", 0, errors.Wrap(err, "failed getting latest release of rclone-webui")
+		return "", "", 0, fmt.Errorf("failed getting latest release of rclone-webui: %w", err)
 	}
 	defer fs.CheckClose(resp.Body, &err)
 	if resp.StatusCode != http.StatusOK {
-		return "", "", 0, errors.Errorf("bad HTTP status %d (%s) when fetching %s", resp.StatusCode, resp.Status, fetchURL)
+		return "", "", 0, fmt.Errorf("bad HTTP status %d (%s) when fetching %s", resp.StatusCode, resp.Status, fetchURL)
 	}
 	results := gitHubRequest{}
 	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		return "", "", 0, errors.Wrap(err, "could not decode results from http request")
+		return "", "", 0, fmt.Errorf("could not decode results from http request: %w", err)
 	}
 	if len(results.Assets) < 1 {
 		return "", "", 0, errors.New("could not find an asset in the release. " +
@@ -59,17 +60,30 @@ func CheckAndDownloadWebGUIRelease(checkUpdate bool, forceUpdate bool, fetchURL 
 		return errors.New("Web GUI path exists, but is a file instead of folder. Please check the path " + extractPath)
 	}
 
+	// Get the latest release details
+	WebUIURL, tag, size, err := GetLatestReleaseURL(fetchURL)
+	if err != nil {
+		return fmt.Errorf("Error checking for web gui release update, skipping update: %w", err)
+	}
+	dat, err := ioutil.ReadFile(tagPath)
+	tagsMatch := false
+	if err != nil {
+		fs.Errorf(nil, "Error reading tag file at %s ", tagPath)
+		checkUpdate = true
+	} else if string(dat) == tag {
+		tagsMatch = true
+	}
+	fs.Debugf(nil, "Current tag: %s, Release tag: %s", string(dat), tag)
+
+	if !tagsMatch {
+		fs.Infof(nil, "A release (%s) for gui is present at %s. Use --rc-web-gui-update to update. Your current version is (%s)", tag, WebUIURL, string(dat))
+	}
+
 	// if the old file exists does not exist or forced update is enforced.
 	// TODO: Add hashing to check integrity of the previous update.
 	if !extractPathExist || checkUpdate || forceUpdate {
-		// Get the latest release details
-		WebUIURL, tag, size, err := GetLatestReleaseURL(fetchURL)
-		if err != nil {
-			return err
-		}
 
-		dat, err := ioutil.ReadFile(tagPath)
-		if err == nil && string(dat) == tag {
+		if tagsMatch {
 			fs.Logf(nil, "No update to Web GUI available.")
 			if !forceUpdate {
 				return nil
@@ -82,7 +96,7 @@ func CheckAndDownloadWebGUIRelease(checkUpdate bool, forceUpdate bool, fetchURL 
 
 		cachePathExist, cachePathStat, _ := exists(cachePath)
 		if !cachePathExist {
-			if err := os.MkdirAll(cachePath, 0755); err != nil {
+			if err := file.MkdirAll(cachePath, 0755); err != nil {
 				return errors.New("Error creating cache directory: " + cachePath)
 			}
 		}
@@ -91,7 +105,7 @@ func CheckAndDownloadWebGUIRelease(checkUpdate bool, forceUpdate bool, fetchURL 
 			return errors.New("Web GUI path is a file instead of folder. Please check it " + extractPath)
 		}
 
-		fs.Logf(nil, "A new release for gui is present at "+WebUIURL)
+		fs.Logf(nil, "A new release for gui (%s) is present at %s", tag, WebUIURL)
 		fs.Logf(nil, "Downloading webgui binary. Please wait. [Size: %s, Path :  %s]\n", strconv.Itoa(size), zipPath)
 
 		// download the zip from latest url
@@ -136,7 +150,7 @@ func DownloadFile(filepath string, url string) (err error) {
 	}
 	defer fs.CheckClose(resp.Body, &err)
 	if resp.StatusCode != http.StatusOK {
-		return errors.Errorf("bad HTTP status %d (%s) when fetching %s", resp.StatusCode, resp.Status, url)
+		return fmt.Errorf("bad HTTP status %d (%s) when fetching %s", resp.StatusCode, resp.Status, url)
 	}
 
 	// Create the file
@@ -161,7 +175,7 @@ func Unzip(src, dest string) (err error) {
 	}
 	defer fs.CheckClose(r, &err)
 
-	if err := os.MkdirAll(dest, 0755); err != nil {
+	if err := file.MkdirAll(dest, 0755); err != nil {
 		return err
 	}
 
@@ -180,14 +194,14 @@ func Unzip(src, dest string) (err error) {
 		defer fs.CheckClose(rc, &err)
 
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err := file.MkdirAll(path, 0755); err != nil {
 				return err
 			}
 		} else {
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			if err := file.MkdirAll(filepath.Dir(path), 0755); err != nil {
 				return err
 			}
-			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+			f, err := file.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 			if err != nil {
 				return err
 			}
@@ -226,7 +240,7 @@ func exists(path string) (existence bool, stat os.FileInfo, err error) {
 func CreatePathIfNotExist(path string) (err error) {
 	exists, stat, _ := exists(path)
 	if !exists {
-		if err := os.MkdirAll(path, 0755); err != nil {
+		if err := file.MkdirAll(path, 0755); err != nil {
 			return errors.New("Error creating : " + path)
 		}
 	}

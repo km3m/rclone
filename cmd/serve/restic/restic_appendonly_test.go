@@ -1,3 +1,6 @@
+//go:build go1.17
+// +build go1.17
+
 package restic
 
 import (
@@ -12,6 +15,7 @@ import (
 
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/cmd/serve/httplib/httpflags"
+	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,6 +67,7 @@ func createOverwriteDeleteSeq(t testing.TB, path string) []TestRequest {
 
 // TestResticHandler runs tests on the restic handler code, especially in append-only mode.
 func TestResticHandler(t *testing.T) {
+	configfile.Install()
 	buf := make([]byte, 32)
 	_, err := io.ReadFull(rand.Reader, buf)
 	require.NoError(t, err)

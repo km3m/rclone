@@ -1,6 +1,7 @@
 // Package mount implements a FUSE mounting system for rclone remotes.
 
-// +build linux,go1.13 darwin,go1.13 freebsd,go1.13
+//go:build linux || freebsd
+// +build linux freebsd
 
 package mount
 
@@ -34,12 +35,6 @@ func mountOptions(VFS *vfs.VFS, device string, opt *mountlib.Options) (options [
 	}
 	if opt.AsyncRead {
 		options = append(options, fuse.AsyncRead())
-	}
-	if opt.NoAppleDouble {
-		options = append(options, fuse.NoAppleDouble())
-	}
-	if opt.NoAppleXattr {
-		options = append(options, fuse.NoAppleXattr())
 	}
 	if opt.AllowNonEmpty {
 		options = append(options, fuse.AllowNonEmptyMount())
@@ -97,12 +92,12 @@ func mount(VFS *vfs.VFS, mountpoint string, opt *mountlib.Options) (<-chan error
 	}
 
 	filesys := NewFS(VFS, opt)
-	server := fusefs.New(c, nil)
+	filesys.server = fusefs.New(c, nil)
 
 	// Serve the mount point in the background returning error to errChan
 	errChan := make(chan error, 1)
 	go func() {
-		err := server.Serve(filesys)
+		err := filesys.server.Serve(filesys)
 		closeErr := c.Close()
 		if err == nil {
 			err = closeErr

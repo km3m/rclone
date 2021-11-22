@@ -74,17 +74,16 @@ Which is control chars + [' ', '*', '.', '/', ':', '<', '>', '?', '|']
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/sharefile/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -110,10 +109,10 @@ const (
 	decayConstant               = 2              // bigger for slower decay, exponential
 	apiPath                     = "/sf/v3"       // add to endpoint to get API path
 	tokenPath                   = "/oauth/token" // add to endpoint to get Token path
-	minChunkSize                = 256 * fs.KibiByte
-	maxChunkSize                = 2 * fs.GibiByte
-	defaultChunkSize            = 64 * fs.MebiByte
-	defaultUploadCutoff         = 128 * fs.MebiByte
+	minChunkSize                = 256 * fs.Kibi
+	maxChunkSize                = 2 * fs.Gibi
+	defaultChunkSize            = 64 * fs.Mebi
+	defaultUploadCutoff         = 128 * fs.Mebi
 )
 
 // Generate a new oauth2 config which we will update when we know the TokenURL
@@ -136,7 +135,7 @@ func init() {
 		Name:        "sharefile",
 		Description: "Citrix Sharefile",
 		NewFs:       NewFs,
-		Config: func(name string, m configmap.Mapper) {
+		Config: func(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
 			oauthConfig := newOauthConfig("")
 			checkAuth := func(oauthConfig *oauth2.Config, auth *oauthutil.AuthResult) error {
 				if auth == nil || auth.Form == nil {
@@ -145,20 +144,17 @@ func init() {
 				subdomain := auth.Form.Get("subdomain")
 				apicp := auth.Form.Get("apicp")
 				if subdomain == "" || apicp == "" {
-					return errors.Errorf("subdomain or apicp not found in response: %+v", auth.Form)
+					return fmt.Errorf("subdomain or apicp not found in response: %+v", auth.Form)
 				}
 				endpoint := "https://" + subdomain + "." + apicp
 				m.Set("endpoint", endpoint)
 				oauthConfig.Endpoint.TokenURL = endpoint + tokenPath
 				return nil
 			}
-			opt := oauthutil.Options{
-				CheckAuth: checkAuth,
-			}
-			err := oauthutil.Config("sharefile", name, m, oauthConfig, &opt)
-			if err != nil {
-				log.Fatalf("Failed to configure token: %v", err)
-			}
+			return oauthutil.ConfigOut("", &oauthutil.Options{
+				OAuth2Config: oauthConfig,
+				CheckAuth:    checkAuth,
+			})
 		},
 		Options: []fs.Option{{
 			Name:     "upload_cutoff",
@@ -167,13 +163,13 @@ func init() {
 			Advanced: true,
 		}, {
 			Name: "root_folder_id",
-			Help: `ID of the root folder
+			Help: `ID of the root folder.
 
 Leave blank to access "Personal Folders".  You can use one of the
 standard values here or any folder ID (long hex number ID).`,
 			Examples: []fs.OptionExample{{
 				Value: "",
-				Help:  `Access the Personal Folders. (Default)`,
+				Help:  `Access the Personal Folders (default).`,
 			}, {
 				Value: "favorites",
 				Help:  "Access the Favorites folder.",
@@ -190,7 +186,9 @@ standard values here or any folder ID (long hex number ID).`,
 		}, {
 			Name:    "chunk_size",
 			Default: defaultChunkSize,
-			Help: `Upload chunk size. Must a power of 2 >= 256k.
+			Help: `Upload chunk size.
+
+Must a power of 2 >= 256k.
 
 Making this larger will improve performance, but note that each chunk
 is buffered in memory one per transfer.
@@ -237,6 +235,7 @@ type Fs struct {
 	name         string             // name of this remote
 	root         string             // the path we are working on
 	opt          Options            // parsed options
+	ci           *fs.ConfigInfo     // global config
 	features     *fs.Features       // optional features
 	srv          *rest.Client       // the connection to the server
 	dirCache     *dircache.DirCache // Map of directory path to directory id
@@ -298,7 +297,10 @@ var retryErrorCodes = []int{
 
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
-func shouldRetry(resp *http.Response, err error) (bool, error) {
+func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	if fserrors.ContextError(ctx, &err) {
+		return false, err
+	}
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
 }
 
@@ -323,7 +325,7 @@ func (f *Fs) readMetaDataForIDPath(ctx context.Context, id, path string, directo
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &item)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
@@ -332,13 +334,17 @@ func (f *Fs) readMetaDataForIDPath(ctx context.Context, id, path string, directo
 			}
 			return nil, fs.ErrorDirNotFound
 		}
-		return nil, errors.Wrap(err, "couldn't find item")
+		return nil, fmt.Errorf("couldn't find item: %w", err)
 	}
 	if directoriesOnly && item.Type != api.ItemTypeFolder {
 		return nil, fs.ErrorIsFile
 	}
-	if filesOnly && item.Type != api.ItemTypeFile {
-		return nil, fs.ErrorNotAFile
+	if filesOnly {
+		if item.Type == api.ItemTypeFolder {
+			return nil, fs.ErrorIsDir
+		} else if item.Type != api.ItemTypeFile {
+			return nil, fs.ErrorNotAFile
+		}
 	}
 	return &item, nil
 }
@@ -380,10 +386,10 @@ func errorHandler(resp *http.Response) error {
 
 func checkUploadChunkSize(cs fs.SizeSuffix) error {
 	if cs < minChunkSize {
-		return errors.Errorf("ChunkSize: %s is less than %s", cs, minChunkSize)
+		return fmt.Errorf("ChunkSize: %s is less than %s", cs, minChunkSize)
 	}
 	if cs > maxChunkSize {
-		return errors.Errorf("ChunkSize: %s is greater than %s", cs, maxChunkSize)
+		return fmt.Errorf("ChunkSize: %s is greater than %s", cs, maxChunkSize)
 	}
 	return nil
 }
@@ -410,8 +416,7 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 }
 
 // NewFs constructs an Fs from the path, container:path
-func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
-	ctx := context.Background()
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
@@ -437,23 +442,25 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	oauthConfig := newOauthConfig(opt.Endpoint + tokenPath)
 	var client *http.Client
 	var ts *oauthutil.TokenSource
-	client, ts, err = oauthutil.NewClient(name, m, oauthConfig)
+	client, ts, err = oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure sharefile")
+		return nil, fmt.Errorf("failed to configure sharefile: %w", err)
 	}
 
+	ci := fs.GetConfig(ctx)
 	f := &Fs{
 		name:  name,
 		root:  root,
 		opt:   *opt,
+		ci:    ci,
 		srv:   rest.NewClient(client).SetRoot(opt.Endpoint + apiPath),
-		pacer: fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
 		CanHaveEmptyDirectories: true,
 		ReadMimeType:            false,
-	}).Fill(f)
+	}).Fill(ctx, f)
 	f.srv.SetErrorHandler(errorHandler)
 	f.fillBufferTokens()
 
@@ -470,23 +477,23 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	const serverTimezone = "America/New_York"
 	timezone, err := tzdata.Open(serverTimezone)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to open timezone db")
+		return nil, fmt.Errorf("failed to open timezone db: %w", err)
 	}
 	tzdata, err := ioutil.ReadAll(timezone)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read timezone")
+		return nil, fmt.Errorf("failed to read timezone: %w", err)
 	}
 	_ = timezone.Close()
 	f.location, err = time.LoadLocationFromTZData(serverTimezone, tzdata)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to load location from timezone")
+		return nil, fmt.Errorf("failed to load location from timezone: %w", err)
 	}
 
 	// Find ID of user's root folder
 	if opt.RootFolderID == "" {
 		item, err := f.readMetaDataForID(ctx, opt.RootFolderID, true, false)
 		if err != nil {
-			return nil, errors.Wrap(err, "couldn't find root ID")
+			return nil, fmt.Errorf("couldn't find root ID: %w", err)
 		}
 		f.rootID = item.ID
 	} else {
@@ -518,7 +525,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 			}
 			return nil, err
 		}
-		f.features.Fill(&tempF)
+		f.features.Fill(ctx, &tempF)
 		// XXX: update the old f here instead of returning tempF, since
 		// `features` were already filled with functions having *f as a receiver.
 		// See https://github.com/rclone/rclone/issues/2182
@@ -532,8 +539,8 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 
 // Fill up (or reset) the buffer tokens
 func (f *Fs) fillBufferTokens() {
-	f.bufferTokens = make(chan []byte, fs.Config.Transfers)
-	for i := 0; i < fs.Config.Transfers; i++ {
+	f.bufferTokens = make(chan []byte, f.ci.Transfers)
+	for i := 0; i < f.ci.Transfers; i++ {
 		f.bufferTokens <- nil
 	}
 }
@@ -629,10 +636,10 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, &req, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return "", errors.Wrap(err, "CreateDir")
+		return "", fmt.Errorf("CreateDir: %w", err)
 	}
 	return info.ID, nil
 }
@@ -661,10 +668,10 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return found, errors.Wrap(err, "couldn't list files")
+		return found, fmt.Errorf("couldn't list files: %w", err)
 	}
 	for i := range result.Value {
 		item := &result.Value[i]
@@ -818,7 +825,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 			return true
 		})
 		if err != nil {
-			return errors.Wrap(err, "purgeCheck")
+			return fmt.Errorf("purgeCheck: %w", err)
 		}
 		if found {
 			return fs.ErrorDirectoryNotEmpty
@@ -893,7 +900,7 @@ func (f *Fs) updateItem(ctx context.Context, id, leaf, directoryID string, modTi
 		// Parse it back into a time
 		newModTime, err := time.Parse(time.RFC3339Nano, isoTime)
 		if err != nil {
-			return nil, errors.Wrap(err, "updateItem: time parse")
+			return nil, fmt.Errorf("updateItem: time parse: %w", err)
 		}
 		modTime = &newModTime
 	}
@@ -910,7 +917,7 @@ func (f *Fs) updateItem(ctx context.Context, id, leaf, directoryID string, modTi
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, &update, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
@@ -927,7 +934,7 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDir
 	// To demonstrate bug
 	// item, err = f.updateItem(ctx, id, newLeaf, newDirectoryID, nil)
 	// if err != nil {
-	// 	return nil, errors.Wrap(err, "Move rename leaf")
+	// 	return nil, fmt.Errorf("Move rename leaf: %w", err)
 	// }
 	// return item, nil
 	doRenameLeaf := oldLeaf != newLeaf
@@ -940,7 +947,7 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDir
 		tmpLeaf := newLeaf + "." + random.String(8)
 		item, err = f.updateItem(ctx, id, tmpLeaf, "", nil)
 		if err != nil {
-			return nil, errors.Wrap(err, "Move rename leaf")
+			return nil, fmt.Errorf("Move rename leaf: %w", err)
 		}
 	}
 
@@ -949,7 +956,7 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDir
 	if doMove {
 		item, err = f.updateItem(ctx, id, "", newDirectoryID, nil)
 		if err != nil {
-			return nil, errors.Wrap(err, "Move directory")
+			return nil, fmt.Errorf("Move directory: %w", err)
 		}
 	}
 
@@ -957,14 +964,14 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDir
 	if doRenameLeaf {
 		item, err = f.updateItem(ctx, id, newLeaf, "", nil)
 		if err != nil {
-			return nil, errors.Wrap(err, "Move rename leaf")
+			return nil, fmt.Errorf("Move rename leaf: %w", err)
 		}
 	}
 
 	return item, nil
 }
 
-// Move src to this remote using server side move operations.
+// Move src to this remote using server-side move operations.
 //
 // This is stored with the remote path given
 //
@@ -1006,7 +1013,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 }
 
 // DirMove moves src, srcRemote to this remote at dstRemote
-// using server side move operations.
+// using server-side move operations.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1034,7 +1041,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	return nil
 }
 
-// Copy src to this remote using server side copy operations.
+// Copy src to this remote using server-side copy operations.
 //
 // This is stored with the remote path given
 //
@@ -1072,7 +1079,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 
 	sameName := strings.ToLower(srcLeaf) == strings.ToLower(dstLeaf)
 	if sameName && srcParentID == dstParentID {
-		return nil, errors.Errorf("copy: can't copy to a file in the same directory whose name only differs in case: %q vs %q", srcLeaf, dstLeaf)
+		return nil, fmt.Errorf("copy: can't copy to a file in the same directory whose name only differs in case: %q vs %q", srcLeaf, dstLeaf)
 	}
 
 	// Discover whether we can just copy directly or not
@@ -1088,9 +1095,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 		if err == fs.ErrorObjectNotFound || err == fs.ErrorDirNotFound {
 			directCopy = true
 		} else if err != nil {
-			return nil, errors.Wrap(err, "copy: failed to examine destination dir")
+			return nil, fmt.Errorf("copy: failed to examine destination dir: %w", err)
 		} else {
-			// otherwise need to copy via a temporary directlry
+			// otherwise need to copy via a temporary directory
 		}
 	}
 
@@ -1102,17 +1109,17 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 		tmpDir := "rclone-temp-dir-" + random.String(16)
 		err = f.Mkdir(ctx, tmpDir)
 		if err != nil {
-			return nil, errors.Wrap(err, "copy: failed to make temp dir")
+			return nil, fmt.Errorf("copy: failed to make temp dir: %w", err)
 		}
 		defer func() {
 			rmdirErr := f.Rmdir(ctx, tmpDir)
 			if rmdirErr != nil && err == nil {
-				err = errors.Wrap(rmdirErr, "copy: failed to remove temp dir")
+				err = fmt.Errorf("copy: failed to remove temp dir: %w", rmdirErr)
 			}
 		}()
 		tmpDirID, err := f.dirCache.FindDir(ctx, tmpDir, false)
 		if err != nil {
-			return nil, errors.Wrap(err, "copy: failed to find temp dir")
+			return nil, fmt.Errorf("copy: failed to find temp dir: %w", err)
 		}
 		copyTargetDirID = tmpDirID
 	}
@@ -1131,7 +1138,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 	var info *api.Item
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
@@ -1214,7 +1221,7 @@ func (o *Object) Size() int64 {
 // setMetaData sets the metadata from info
 func (o *Object) setMetaData(info *api.Item) (err error) {
 	if info.Type != api.ItemTypeFile {
-		return errors.Wrapf(fs.ErrorNotAFile, "%q is %q", o.remote, info.Type)
+		return fmt.Errorf("%q is %q: %w", o.remote, info.Type, fs.ErrorNotAFile)
 	}
 	o.hasMetaData = true
 	o.size = info.Size
@@ -1292,10 +1299,10 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var dl api.DownloadSpecification
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &dl)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "open: fetch download specification")
+		return nil, fmt.Errorf("open: fetch download specification: %w", err)
 	}
 
 	fs.FixRangeOption(options, o.size)
@@ -1307,10 +1314,10 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "open")
+		return nil, fmt.Errorf("open: %w", err)
 	}
 	return resp.Body, err
 }
@@ -1339,7 +1346,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		Overwrite:    true,
 		CreatedDate:  modTime,
 		ModifiedDate: modTime,
-		Tool:         fs.Config.UserAgent,
+		Tool:         o.fs.ci.UserAgent,
 	}
 
 	if isLargeFile {
@@ -1349,7 +1356,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		} else {
 			// otherwise use threaded which is more efficient
 			req.Method = "threaded"
-			req.ThreadCount = &fs.Config.Transfers
+			req.ThreadCount = &o.fs.ci.Transfers
 			req.Filesize = &size
 		}
 	}
@@ -1363,10 +1370,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.CallJSON(ctx, &opts, &req, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "upload get specification")
+		return fmt.Errorf("upload get specification: %w", err)
 	}
 
 	// If file is large then upload in parts
@@ -1388,10 +1395,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	var finish api.UploadFinishResponse
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &finish)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "upload file")
+		return fmt.Errorf("upload file: %w", err)
 	}
 	return o.checkUploadResponse(ctx, &finish)
 }
@@ -1424,10 +1431,10 @@ func (f *Fs) remove(ctx context.Context, id string) (err error) {
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.Call(ctx, &opts)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "remove")
+		return fmt.Errorf("remove: %w", err)
 	}
 	return nil
 }
@@ -1436,7 +1443,7 @@ func (f *Fs) remove(ctx context.Context, id string) (err error) {
 func (o *Object) Remove(ctx context.Context) error {
 	err := o.readMetaData(ctx)
 	if err != nil {
-		return errors.Wrap(err, "Remove: Failed to read metadata")
+		return fmt.Errorf("Remove: Failed to read metadata: %w", err)
 	}
 	return o.fs.remove(ctx, o.id)
 }

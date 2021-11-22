@@ -19,7 +19,7 @@ func dirCreate(t *testing.T) (r *fstest.Run, vfs *VFS, dir *Dir, item fstest.Ite
 	r, vfs, cleanup = newTestVFS(t)
 
 	file1 := r.WriteObject(context.Background(), "dir/file1", "file1 contents", t1)
-	fstest.CheckItems(t, r.Fremote, file1)
+	r.CheckRemoteItems(t, file1)
 
 	node, err := vfs.Stat("dir")
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestDirWalk(t *testing.T) {
 	defer cleanup()
 
 	file2 := r.WriteObject(context.Background(), "fil/a/b/c", "super long file", t1)
-	fstest.CheckItems(t, r.Fremote, file1, file2)
+	r.CheckRemoteItems(t, file1, file2)
 
 	root, err := vfs.Root()
 	require.NoError(t, err)
@@ -259,7 +259,7 @@ func TestDirReadDirAll(t *testing.T) {
 	file1 := r.WriteObject(context.Background(), "dir/file1", "file1 contents", t1)
 	file2 := r.WriteObject(context.Background(), "dir/file2", "file2- contents", t2)
 	file3 := r.WriteObject(context.Background(), "dir/subdir/file3", "file3-- contents", t3)
-	fstest.CheckItems(t, r.Fremote, file1, file2, file3)
+	r.CheckRemoteItems(t, file1, file2, file3)
 
 	node, err := vfs.Stat("dir")
 	require.NoError(t, err)
@@ -289,16 +289,6 @@ func TestDirReadDirAll(t *testing.T) {
 
 		checkListing(t, dir, []string{"file1,14,false", "virtualDir,0,true", "virtualFile,17,false"})
 
-		// Force a directory reload...
-		dir.invalidateDir("dir")
-
-		checkListing(t, dir, []string{"file1,14,false", "virtualDir,0,true", "virtualFile,17,false"})
-
-		// Check that forgetting the root doesn't invalidate the virtual entries
-		root.ForgetAll()
-
-		checkListing(t, dir, []string{"file1,14,false", "virtualDir,0,true", "virtualFile,17,false"})
-
 		// Now action the deletes and uploads
 		_ = r.WriteObject(context.Background(), "dir/virtualFile", "virtualFile contents", t1)
 		_ = r.WriteObject(context.Background(), "dir/virtualDir/testFile", "testFile contents", t1)
@@ -317,6 +307,29 @@ func TestDirReadDirAll(t *testing.T) {
 		assert.Nil(t, dir.virtual)
 		dir.mu.Unlock()
 
+		// Add some virtual entries and check what happens
+		dir.AddVirtual("virtualFile2", 100, false)
+		dir.AddVirtual("virtualDir2", 0, true)
+		// Remove some existing entries
+		dir.DelVirtual("file1")
+
+		checkListing(t, dir, []string{"virtualDir,0,true", "virtualDir2,0,true", "virtualFile,20,false", "virtualFile2,100,false"})
+
+		// Force a directory reload...
+		dir.invalidateDir("dir")
+
+		want := []string{"file1,14,false", "virtualDir,0,true", "virtualDir2,0,true", "virtualFile,20,false", "virtualFile2,100,false"}
+		features := r.Fremote.Features()
+		if features.CanHaveEmptyDirectories {
+			// snip out virtualDir2 which will only be present if can't have empty dirs
+			want = append(want[:2], want[3:]...)
+		}
+		checkListing(t, dir, want)
+
+		// Check that forgetting the root doesn't invalidate the virtual entries
+		root.ForgetAll()
+
+		checkListing(t, dir, want)
 	})
 }
 
@@ -362,6 +375,13 @@ func TestDirCreate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), file2.Size())
 
+	// Try creating the file again - make sure we get the same file node
+	file3, err := dir.Create("potato", os.O_RDWR|os.O_CREATE)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), file3.Size())
+	assert.Equal(t, fmt.Sprintf("%p", file), fmt.Sprintf("%p", file3), "didn't return same node")
+
+	// Test read only fs creating new
 	vfs.Opt.ReadOnly = true
 	_, err = dir.Create("sausage", os.O_WRONLY|os.O_CREATE)
 	assert.Equal(t, EROFS, err)
@@ -565,7 +585,7 @@ func TestDirRename(t *testing.T) {
 		"renamed empty directory,0,true",
 	})
 	// ...we don't check the underlying f.Fremote because on
-	// bucket based remotes the directory won't be there
+	// bucket-based remotes the directory won't be there
 
 	// read only check
 	vfs.Opt.ReadOnly = true

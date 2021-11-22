@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -166,8 +167,9 @@ func runRoot(cmd *cobra.Command, args []string) {
 //
 // Helpful example: http://rtfcode.com/xref/moby-17.03.2-ce/cli/cobra.go
 func setupRootCommand(rootCmd *cobra.Command) {
+	ci := fs.GetConfig(context.Background())
 	// Add global flags
-	configflags.AddFlags(pflag.CommandLine)
+	configflags.AddFlags(ci, pflag.CommandLine)
 	filterflags.AddFlags(pflag.CommandLine)
 	rcflags.AddFlags(pflag.CommandLine)
 	logflags.AddFlags(pflag.CommandLine)
@@ -297,7 +299,7 @@ func showBackend(name string) {
 	var standardOptions, advancedOptions fs.Options
 	done := map[string]struct{}{}
 	for _, opt := range backend.Options {
-		// Skip if done already (eg with Provider options)
+		// Skip if done already (e.g. with Provider options)
 		if _, doneAlready := done[opt.Name]; doneAlready {
 			continue
 		}
@@ -313,7 +315,7 @@ func showBackend(name string) {
 			optionsType = "advanced"
 			continue
 		}
-		fmt.Printf("### %s Options\n\n", strings.Title(optionsType))
+		fmt.Printf("### %s options\n\n", strings.Title(optionsType))
 		fmt.Printf("Here are the %s options specific to %s (%s).\n\n", optionsType, backend.Name, backend.Description)
 		optionsType = "advanced"
 		for _, opt := range opts {

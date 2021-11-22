@@ -1,6 +1,9 @@
 package http
 
 import (
+	"html/template"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -8,19 +11,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rclone/rclone/cmd"
-	"github.com/rclone/rclone/cmd/serve/httplib"
-	"github.com/rclone/rclone/cmd/serve/httplib/httpflags"
-	"github.com/rclone/rclone/cmd/serve/httplib/serve"
+	"github.com/rclone/rclone/cmd/serve/http/data"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	httplib "github.com/rclone/rclone/lib/http"
+	"github.com/rclone/rclone/lib/http/auth"
+	"github.com/rclone/rclone/lib/http/serve"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfsflags"
 	"github.com/spf13/cobra"
 )
 
+// Options required for http server
+type Options struct {
+	data.Options
+}
+
+// DefaultOpt is the default values used for Options
+var DefaultOpt = Options{}
+
+// Opt is options set by command line flags
+var Opt = DefaultOpt
+
 func init() {
-	httpflags.AddFlags(Command.Flags())
+	data.AddFlags(Command.Flags(), "", &Opt.Options)
+	httplib.AddFlags(Command.Flags())
+	auth.AddFlags(Command.Flags())
 	vfsflags.AddFlags(Command.Flags())
 }
 
@@ -32,24 +51,25 @@ var Command = &cobra.Command{
 over HTTP.  This can be viewed in a web browser or you can make a
 remote of type http read from it.
 
-You can use the filter flags (eg --include, --exclude) to control what
+You can use the filter flags (e.g. --include, --exclude) to control what
 is served.
 
 The server will log errors.  Use -v to see access logs.
 
 --bwlimit will be respected for file transfers.  Use --stats to
 control the stats printing.
-` + httplib.Help + vfs.Help,
+` + httplib.Help + data.Help + auth.Help + vfs.Help,
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		f := cmd.NewFsSrc(args)
 		cmd.Run(false, true, command, func() error {
-			s := newServer(f, &httpflags.Opt)
-			err := s.Serve()
+			s := newServer(f, Opt.Template)
+			router, err := httplib.Router()
 			if err != nil {
 				return err
 			}
-			s.Wait()
+			s.Bind(router)
+			httplib.Wait()
 			return nil
 		})
 	},
@@ -57,49 +77,40 @@ control the stats printing.
 
 // server contains everything to run the server
 type server struct {
-	*httplib.Server
-	f   fs.Fs
-	vfs *vfs.VFS
+	f            fs.Fs
+	vfs          *vfs.VFS
+	HTMLTemplate *template.Template // HTML template for web interface
 }
 
-func newServer(f fs.Fs, opt *httplib.Options) *server {
-	mux := http.NewServeMux()
-	s := &server{
-		Server: httplib.NewServer(mux, opt),
-		f:      f,
-		vfs:    vfs.New(f, &vfsflags.Opt),
+func newServer(f fs.Fs, templatePath string) *server {
+	htmlTemplate, templateErr := data.GetTemplate(templatePath)
+	if templateErr != nil {
+		log.Fatalf(templateErr.Error())
 	}
-	mux.HandleFunc(s.Opt.BaseURL+"/", s.handler)
+	s := &server{
+		f:            f,
+		vfs:          vfs.New(f, &vfsflags.Opt),
+		HTMLTemplate: htmlTemplate,
+	}
 	return s
 }
 
-// Serve runs the http server in the background.
-//
-// Use s.Close() and s.Wait() to shutdown server
-func (s *server) Serve() error {
-	err := s.Server.Serve()
-	if err != nil {
-		return err
+func (s *server) Bind(router chi.Router) {
+	if m := auth.Auth(auth.Opt); m != nil {
+		router.Use(m)
 	}
-	fs.Logf(s.f, "Serving on %s", s.URL())
-	return nil
+	router.Use(
+		middleware.SetHeader("Accept-Ranges", "bytes"),
+		middleware.SetHeader("Server", "rclone/"+fs.Version),
+	)
+	router.Get("/*", s.handler)
+	router.Head("/*", s.handler)
 }
 
 // handler reads incoming requests and dispatches them
 func (s *server) handler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" && r.Method != "HEAD" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Server", "rclone/"+fs.Version)
-
-	urlPath, ok := s.Path(w, r)
-	if !ok {
-		return
-	}
-	isDir := strings.HasSuffix(urlPath, "/")
-	remote := strings.Trim(urlPath, "/")
+	isDir := strings.HasSuffix(r.URL.Path, "/")
+	remote := strings.Trim(r.URL.Path, "/")
 	if isDir {
 		s.serveDir(w, r, remote)
 	} else {
@@ -172,8 +183,11 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, remote string
 	obj := entry.(fs.Object)
 	file := node.(*vfs.File)
 
-	// Set content length since we know how long the object is
-	w.Header().Set("Content-Length", strconv.FormatInt(node.Size(), 10))
+	// Set content length if we know how long the object is
+	knownSize := obj.Size() >= 0
+	if knownSize {
+		w.Header().Set("Content-Length", strconv.FormatInt(node.Size(), 10))
+	}
 
 	// Set content type
 	mimeType := fs.MimeType(r.Context(), obj)
@@ -206,9 +220,23 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, remote string
 
 	// Account the transfer
 	tr := accounting.Stats(r.Context()).NewTransfer(obj)
-	defer tr.Done(nil)
+	defer tr.Done(r.Context(), nil)
 	// FIXME in = fs.NewAccount(in, obj).WithBuffer() // account the transfer
 
 	// Serve the file
-	http.ServeContent(w, r, remote, node.ModTime(), in)
+	if knownSize {
+		http.ServeContent(w, r, remote, node.ModTime(), in)
+	} else {
+		// http.ServeContent can't serve unknown length files
+		if rangeRequest := r.Header.Get("Range"); rangeRequest != "" {
+			http.Error(w, "Can't use Range: on files of unknown length", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		n, err := io.Copy(w, in)
+		if err != nil {
+			fs.Errorf(obj, "Didn't finish writing GET request (wrote %d/unknown bytes): %v", n, err)
+			return
+		}
+	}
+
 }

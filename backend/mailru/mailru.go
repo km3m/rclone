@@ -3,6 +3,7 @@ package mailru
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	gohash "hash"
 	"io"
@@ -37,9 +38,9 @@ import (
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/lib/rest"
 
-	"github.com/pkg/errors"
 	"golang.org/x/oauth2"
 )
 
@@ -79,18 +80,18 @@ var oauthConfig = &oauth2.Config{
 
 // Register with Fs
 func init() {
-	MrHashType = hash.RegisterHash("MailruHash", 40, mrhash.New)
+	MrHashType = hash.RegisterHash("mailru", "MailruHash", 40, mrhash.New)
 	fs.Register(&fs.RegInfo{
 		Name:        "mailru",
 		Description: "Mail.ru Cloud",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name:     "user",
-			Help:     "User name (usually email)",
+			Help:     "User name (usually email).",
 			Required: true,
 		}, {
 			Name:       "pass",
-			Help:       "Password",
+			Help:       "Password.",
 			Required:   true,
 			IsPassword: true,
 		}, {
@@ -98,9 +99,11 @@ func init() {
 			Default:  true,
 			Advanced: false,
 			Help: `Skip full upload if there is another file with same data hash.
+
 This feature is called "speedup" or "put by hash". It is especially efficient
 in case of generally available files like popular books, video or audio clips,
 because files are searched by hash in all accounts of all mailru users.
+It is meaningless and ineffective if source file is unique or encrypted.
 Please note that rclone may need local memory and disk space to calculate
 content hash in advance and decide whether full upload is required.
 Also, if rclone does not know file size in advance (e.g. in case of
@@ -117,6 +120,7 @@ streaming or partial uploads), it will not even try this optimization.`,
 			Default:  "*.mkv,*.avi,*.mp4,*.mp3,*.zip,*.gz,*.rar,*.pdf",
 			Advanced: true,
 			Help: `Comma separated list of file name patterns eligible for speedup (put by hash).
+
 Patterns are case insensitive and can contain '*' or '?' meta characters.`,
 			Examples: []fs.OptionExample{{
 				Value: "",
@@ -135,8 +139,9 @@ Patterns are case insensitive and can contain '*' or '?' meta characters.`,
 			Name:     "speedup_max_disk",
 			Default:  fs.SizeSuffix(3 * 1024 * 1024 * 1024),
 			Advanced: true,
-			Help: `This option allows you to disable speedup (put by hash) for large files
-(because preliminary hashing can exhaust you RAM or disk space)`,
+			Help: `This option allows you to disable speedup (put by hash) for large files.
+
+Reason is that preliminary hashing can exhaust your RAM or disk space.`,
 			Examples: []fs.OptionExample{{
 				Value: "0",
 				Help:  "Completely disable speedup (put by hash).",
@@ -166,7 +171,7 @@ Patterns are case insensitive and can contain '*' or '?' meta characters.`,
 			Name:     "check_hash",
 			Default:  true,
 			Advanced: true,
-			Help:     "What should copy do if file checksum is mismatched or invalid",
+			Help:     "What should copy do if file checksum is mismatched or invalid.",
 			Examples: []fs.OptionExample{{
 				Value: "true",
 				Help:  "Fail with error.",
@@ -180,6 +185,7 @@ Patterns are case insensitive and can contain '*' or '?' meta characters.`,
 			Advanced: true,
 			Hide:     fs.OptionHideBoth,
 			Help: `HTTP user agent used internally by client.
+
 Defaults to "rclone/VERSION" or "--user-agent" provided on command line.`,
 		}, {
 			Name:     "quirks",
@@ -187,11 +193,12 @@ Defaults to "rclone/VERSION" or "--user-agent" provided on command line.`,
 			Advanced: true,
 			Hide:     fs.OptionHideBoth,
 			Help: `Comma separated list of internal maintenance flags.
+
 This option must not be used by an ordinary user. It is intended only to
 facilitate remote troubleshooting of backend issues. Strict meaning of
 flags is not documented and not guaranteed to persist between releases.
 Quirks will be removed when the backend grows stable.
-Supported quirks: atomicmkdir binlist gzip insecure retry400`,
+Supported quirks: atomicmkdir binlist unknowndirs`,
 		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
@@ -232,13 +239,13 @@ var retryErrorCodes = []int{
 // shouldRetry returns a boolean as to whether this response and err
 // deserve to be retried. It returns the err as a convenience.
 // Retries password authorization (once) in a special case of access denied.
-func shouldRetry(res *http.Response, err error, f *Fs, opts *rest.Opts) (bool, error) {
+func shouldRetry(ctx context.Context, res *http.Response, err error, f *Fs, opts *rest.Opts) (bool, error) {
+	if fserrors.ContextError(ctx, &err) {
+		return false, err
+	}
 	if res != nil && res.StatusCode == 403 && f.opt.Password != "" && !f.passFailed {
 		reAuthErr := f.reAuthorize(opts, err)
 		return reAuthErr == nil, err // return an original error
-	}
-	if res != nil && res.StatusCode == 400 && f.quirks.retry400 {
-		return true, err
 	}
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(res, retryErrorCodes), err
 }
@@ -262,7 +269,7 @@ func errorHandler(res *http.Response) (err error) {
 	}
 	serverError.Message = string(data)
 	if serverError.Message == "" || strings.HasPrefix(serverError.Message, "{") {
-		// Replace empty or JSON response with a human readable text.
+		// Replace empty or JSON response with a human-readable text.
 		serverError.Message = res.Status
 	}
 	serverError.Status = res.StatusCode
@@ -274,8 +281,9 @@ type Fs struct {
 	name         string
 	root         string             // root path
 	opt          Options            // parsed options
+	ci           *fs.ConfigInfo     // global config
 	speedupGlobs []string           // list of file name patterns eligible for speedup
-	speedupAny   bool               // true if all file names are aligible for speedup
+	speedupAny   bool               // true if all file names are eligible for speedup
 	features     *fs.Features       // optional features
 	srv          *rest.Client       // REST API client
 	cli          *http.Client       // underlying HTTP client (for authorize)
@@ -295,9 +303,8 @@ type Fs struct {
 }
 
 // NewFs constructs an Fs from the path, container:path
-func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// fs.Debugf(nil, ">>> NewFs %q %q", name, root)
-	ctx := context.Background() // Note: NewFs does not pass context!
 
 	// Parse config into Options struct
 	opt := new(Options)
@@ -314,10 +321,12 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// However the f.root string should not have leading or trailing slashes
 	root = strings.Trim(root, "/")
 
+	ci := fs.GetConfig(ctx)
 	f := &Fs{
 		name: name,
 		root: root,
 		opt:  *opt,
+		ci:   ci,
 		m:    m,
 	}
 
@@ -326,7 +335,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}
 	f.quirks.parseQuirks(opt.Quirks)
 
-	f.pacer = fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleepPacer), pacer.MaxSleep(maxSleepPacer), pacer.DecayConstant(decayConstPacer)))
+	f.pacer = fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleepPacer), pacer.MaxSleep(maxSleepPacer), pacer.DecayConstant(decayConstPacer)))
 
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -334,26 +343,20 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		// Can copy/move across mailru configs (almost, thus true here), but
 		// only when they share common account (this is checked in Copy/Move).
 		ServerSideAcrossConfigs: true,
-	}).Fill(f)
+	}).Fill(ctx, f)
 
 	// Override few config settings and create a client
-	clientConfig := *fs.Config
+	newCtx, clientConfig := fs.AddConfig(ctx)
 	if opt.UserAgent != "" {
 		clientConfig.UserAgent = opt.UserAgent
 	}
-	clientConfig.NoGzip = !f.quirks.gzip // Send not "Accept-Encoding: gzip" like official client
-	f.cli = fshttp.NewClient(&clientConfig)
+	clientConfig.NoGzip = true // Mimic official client, skip sending "Accept-Encoding: gzip"
+	f.cli = fshttp.NewClient(newCtx)
 
 	f.srv = rest.NewClient(f.cli)
 	f.srv.SetRoot(api.APIServerURL)
 	f.srv.SetHeader("Accept", "*/*") // Send "Accept: */*" with every request like official client
 	f.srv.SetErrorHandler(errorHandler)
-
-	if f.quirks.insecure {
-		transport := f.cli.Transport.(*fshttp.Transport).Transport
-		transport.TLSClientConfig.InsecureSkipVerify = true
-		transport.ProxyConnectHeader = http.Header{"User-Agent": {clientConfig.UserAgent}}
-	}
 
 	if err = f.authorize(ctx, false); err != nil {
 		return nil, err
@@ -387,30 +390,14 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 // Internal maintenance flags (to be removed when the backend matures).
 // Primarily intended to facilitate remote support and troubleshooting.
 type quirks struct {
-	gzip        bool
-	insecure    bool
 	binlist     bool
 	atomicmkdir bool
-	retry400    bool
+	unknowndirs bool
 }
 
 func (q *quirks) parseQuirks(option string) {
 	for _, flag := range strings.Split(option, ",") {
 		switch strings.ToLower(strings.TrimSpace(flag)) {
-		case "gzip":
-			// This backend mimics the official client which never sends the
-			// "Accept-Encoding: gzip" header. However, enabling compression
-			// might be good for performance.
-			// Use this quirk to investigate the performance impact.
-			// Remove this quirk if performance does not improve.
-			q.gzip = true
-		case "insecure":
-			// The mailru disk-o protocol is not documented. To compare HTTP
-			// stream against the official client one can use Telerik Fiddler,
-			// which introduces a self-signed certificate. This quirk forces
-			// the Go http layer to accept it.
-			// Remove this quirk when the backend reaches maturity.
-			q.insecure = true
 		case "binlist":
 			// The official client sometimes uses a so called "bin" protocol,
 			// implemented in the listBin file system method below. This method
@@ -423,18 +410,14 @@ func (q *quirks) parseQuirks(option string) {
 		case "atomicmkdir":
 			// At the moment rclone requires Mkdir to return success if the
 			// directory already exists. However, such programs as borgbackup
-			// or restic use mkdir as a locking primitive and depend on its
-			// atomicity. This quirk is a workaround. It can be removed
-			// when the above issue is investigated.
+			// use mkdir as a locking primitive and depend on its atomicity.
+			// Remove this quirk when the above issue is investigated.
 			q.atomicmkdir = true
-		case "retry400":
-			// This quirk will help in troubleshooting a very rare "Error 400"
-			// issue. It can be removed if the problem does not show up
-			// for a year or so. See the below issue:
-			// https://github.com/ivandeex/rclone/issues/14
-			q.retry400 = true
+		case "unknowndirs":
+			// Accepts unknown resource types as folders.
+			q.unknowndirs = true
 		default:
-			// Just ignore all unknown flags
+			// Ignore unknown flags
 		}
 	}
 }
@@ -448,14 +431,14 @@ func (f *Fs) authorize(ctx context.Context, force bool) (err error) {
 
 	if err != nil || !tokenIsValid(t) {
 		fs.Infof(f, "Valid token not found, authorizing.")
-		ctx := oauthutil.Context(f.cli)
+		ctx := oauthutil.Context(ctx, f.cli)
 		t, err = oauthConfig.PasswordCredentialsToken(ctx, f.opt.Username, f.opt.Password)
 	}
 	if err == nil && !tokenIsValid(t) {
 		err = errors.New("Invalid token")
 	}
 	if err != nil {
-		return errors.Wrap(err, "Failed to authorize")
+		return fmt.Errorf("Failed to authorize: %w", err)
 	}
 
 	if err = oauthutil.PutToken(f.name, f.m, t, false); err != nil {
@@ -471,7 +454,7 @@ func (f *Fs) authorize(ctx context.Context, force bool) (err error) {
 	// crashing with panic `comparing uncomparable type map[string]interface{}`
 	// As a workaround, mimic oauth2.NewClient() wrapping token source in
 	// oauth2.ReuseTokenSource
-	_, ts, err := oauthutil.NewClientWithBaseClient(f.name, f.m, oauthConfig, f.cli)
+	_, ts, err := oauthutil.NewClientWithBaseClient(ctx, f.name, f.m, oauthConfig, f.cli)
 	if err == nil {
 		f.source = oauth2.ReuseTokenSource(nil, ts)
 	}
@@ -524,7 +507,7 @@ func (f *Fs) reAuthorize(opts *rest.Opts, origErr error) error {
 func (f *Fs) accessToken() (string, error) {
 	token, err := f.source.Token()
 	if err != nil {
-		return "", errors.Wrap(err, "cannot refresh access token")
+		return "", fmt.Errorf("cannot refresh access token: %w", err)
 	}
 	return token.AccessToken, nil
 }
@@ -550,7 +533,7 @@ func (f *Fs) relPath(absPath string) (string, error) {
 	return "", fmt.Errorf("path %q should be under %q", absPath, f.root)
 }
 
-// metaServer ...
+// metaServer returns URL of current meta server
 func (f *Fs) metaServer(ctx context.Context) (string, error) {
 	f.metaMu.Lock()
 	defer f.metaMu.Unlock()
@@ -625,7 +608,7 @@ func (f *Fs) readItemMetaData(ctx context.Context, path string) (entry fs.DirEnt
 	var info api.ItemInfoResponse
 	err = f.pacer.Call(func() (bool, error) {
 		res, err := f.srv.CallJSON(ctx, &opts, nil, &info)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 
 	if err != nil {
@@ -655,28 +638,56 @@ func (f *Fs) itemToDirEntry(ctx context.Context, item *api.ListItem) (entry fs.D
 	if err != nil {
 		return nil, -1, err
 	}
-	switch item.Kind {
-	case "folder":
-		dir := fs.NewDir(remote, time.Unix(item.Mtime, 0)).SetSize(item.Size)
-		dirSize := item.Count.Files + item.Count.Folders
-		return dir, dirSize, nil
-	case "file":
-		binHash, err := mrhash.DecodeString(item.Hash)
-		if err != nil {
-			return nil, -1, err
-		}
-		file := &Object{
-			fs:          f,
-			remote:      remote,
-			hasMetaData: true,
-			size:        item.Size,
-			mrHash:      binHash,
-			modTime:     time.Unix(item.Mtime, 0),
-		}
-		return file, -1, nil
-	default:
-		return nil, -1, fmt.Errorf("Unknown resource type %q", item.Kind)
+
+	mTime := int64(item.Mtime)
+	if mTime < 0 {
+		fs.Debugf(f, "Fixing invalid timestamp %d on mailru file %q", mTime, remote)
+		mTime = 0
 	}
+	modTime := time.Unix(mTime, 0)
+
+	isDir, err := f.isDir(item.Kind, remote)
+	if err != nil {
+		return nil, -1, err
+	}
+	if isDir {
+		dir := fs.NewDir(remote, modTime).SetSize(item.Size)
+		return dir, item.Count.Files + item.Count.Folders, nil
+	}
+
+	binHash, err := mrhash.DecodeString(item.Hash)
+	if err != nil {
+		return nil, -1, err
+	}
+	file := &Object{
+		fs:          f,
+		remote:      remote,
+		hasMetaData: true,
+		size:        item.Size,
+		mrHash:      binHash,
+		modTime:     modTime,
+	}
+	return file, -1, nil
+}
+
+// isDir returns true for directories, false for files
+func (f *Fs) isDir(kind, path string) (bool, error) {
+	switch kind {
+	case "":
+		return false, errors.New("empty resource type")
+	case "file":
+		return false, nil
+	case "folder":
+		// fall thru
+	case "camera-upload", "mounted", "shared":
+		fs.Debugf(f, "[%s]: folder has type %q", path, kind)
+	default:
+		if !f.quirks.unknowndirs {
+			return false, fmt.Errorf("unknown resource type %q", kind)
+		}
+		fs.Errorf(f, "[%s]: folder has unknown type %q", path, kind)
+	}
+	return true, nil
 }
 
 // List the objects and directories in dir into entries.
@@ -692,7 +703,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		entries, err = f.listM1(ctx, f.absPath(dir), 0, maxInt32)
 	}
 
-	if err == nil && fs.Config.LogLevel >= fs.LogLevelDebug {
+	if err == nil && f.ci.LogLevel >= fs.LogLevelDebug {
 		names := []string{}
 		for _, entry := range entries {
 			names = append(names, entry.Remote())
@@ -733,7 +744,7 @@ func (f *Fs) listM1(ctx context.Context, dirPath string, offset int, limit int) 
 	)
 	err = f.pacer.Call(func() (bool, error) {
 		res, err = f.srv.CallJSON(ctx, &opts, nil, &info)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 
 	if err != nil {
@@ -744,7 +755,11 @@ func (f *Fs) listM1(ctx context.Context, dirPath string, offset int, limit int) 
 		return nil, err
 	}
 
-	if info.Body.Kind != "folder" {
+	isDir, err := f.isDir(info.Body.Kind, dirPath)
+	if err != nil {
+		return nil, err
+	}
+	if !isDir {
 		return nil, fs.ErrorIsFile
 	}
 
@@ -793,7 +808,7 @@ func (f *Fs) listBin(ctx context.Context, dirPath string, depth int) (entries fs
 	var res *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		res, err = f.srv.Call(ctx, &opts)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 	if err != nil {
 		closeBody(res)
@@ -952,7 +967,7 @@ func (t *treeState) NextRecord() (fs.DirEntry, error) {
 		return nil, r.Error()
 	}
 
-	if fs.Config.LogLevel >= fs.LogLevelDebug {
+	if t.f.ci.LogLevel >= fs.LogLevelDebug {
 		ctime, _ := modTime.MarshalJSON()
 		fs.Debugf(t.f, "binDir %d.%d %q %q (%d) %s", t.level, itemType, t.currDir, name, size, ctime)
 	}
@@ -1066,7 +1081,7 @@ func (f *Fs) CreateDir(ctx context.Context, path string) error {
 	var res *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		res, err = f.srv.Call(ctx, &opts)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 	if err != nil {
 		closeBody(res)
@@ -1181,7 +1196,7 @@ func (f *Fs) purgeWithCheck(ctx context.Context, dir string, check bool, opName 
 
 	_, dirSize, err := f.readItemMetaData(ctx, path)
 	if err != nil {
-		return errors.Wrapf(err, "%s failed", opName)
+		return fmt.Errorf("%s failed: %w", opName, err)
 	}
 	if check && dirSize > 0 {
 		return fs.ErrorDirectoryNotEmpty
@@ -1209,7 +1224,7 @@ func (f *Fs) delete(ctx context.Context, path string, hardDelete bool) error {
 	var response api.GenericResponse
 	err = f.pacer.Call(func() (bool, error) {
 		res, err := f.srv.CallJSON(ctx, &opts, nil, &response)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 
 	switch {
@@ -1222,7 +1237,7 @@ func (f *Fs) delete(ctx context.Context, path string, hardDelete bool) error {
 	}
 }
 
-// Copy src to this remote using server side copy operations.
+// Copy src to this remote using server-side copy operations.
 // This is stored with the remote path given.
 // It returns the destination Object and a possible error.
 // Will only be called if src.Fs().Name() == f.Name()
@@ -1281,11 +1296,11 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	var response api.GenericBodyResponse
 	err = f.pacer.Call(func() (bool, error) {
 		res, err := f.srv.CallJSON(ctx, &opts, nil, &response)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't copy file")
+		return nil, fmt.Errorf("couldn't copy file: %w", err)
 	}
 	if response.Status != 200 {
 		return nil, fmt.Errorf("copy failed with code %d", response.Status)
@@ -1317,7 +1332,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return dstObj, err
 }
 
-// Move src to this remote using server side move operations.
+// Move src to this remote using server-side move operations.
 // This is stored with the remote path given.
 // It returns the destination Object and a possible error.
 // Will only be called if src.Fs().Name() == f.Name()
@@ -1385,7 +1400,7 @@ func (f *Fs) moveItemBin(ctx context.Context, srcPath, dstPath, opName string) e
 	var res *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		res, err = f.srv.Call(ctx, &opts)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 	if err != nil {
 		closeBody(res)
@@ -1404,7 +1419,7 @@ func (f *Fs) moveItemBin(ctx context.Context, srcPath, dstPath, opName string) e
 }
 
 // DirMove moves src, srcRemote to this remote at dstRemote
-// using server side move operations.
+// using server-side move operations.
 // Will only be called if src.Fs().Name() == f.Name()
 // If it isn't possible then return fs.ErrorCantDirMove
 // If destination exists then return fs.ErrorDirExists
@@ -1476,7 +1491,7 @@ func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, 
 	var response api.GenericBodyResponse
 	err = f.pacer.Call(func() (bool, error) {
 		res, err := f.srv.CallJSON(ctx, &opts, nil, &response)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 
 	if err == nil && response.Body != "" {
@@ -1517,7 +1532,7 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 	var response api.CleanupResponse
 	err = f.pacer.Call(func() (bool, error) {
 		res, err := f.srv.CallJSON(ctx, &opts, nil, &response)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 	if err != nil {
 		return err
@@ -1550,7 +1565,7 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	var info api.UserInfoResponse
 	err = f.pacer.Call(func() (bool, error) {
 		res, err := f.srv.CallJSON(ctx, &opts, nil, &info)
-		return shouldRetry(res, err, f, &opts)
+		return shouldRetry(ctx, res, err, f, &opts)
 	})
 	if err != nil {
 		return nil, err
@@ -1597,23 +1612,28 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	var (
-		fileBuf    []byte
-		fileHash   []byte
-		newHash    []byte
-		trySpeedup bool
+		fileBuf  []byte
+		fileHash []byte
+		newHash  []byte
+		slowHash bool
+		localSrc bool
 	)
+	if srcObj := fs.UnWrapObjectInfo(src); srcObj != nil {
+		srcFeatures := srcObj.Fs().Features()
+		slowHash = srcFeatures.SlowHash
+		localSrc = srcFeatures.IsLocal
+	}
 
-	// Don't disturb the source if file fits in hash.
-	// Skip an extra speedup request if file fits in hash.
-	if size > mrhash.Size {
-		// Request hash from source.
+	// Try speedup if it's globally enabled but skip extra post
+	// request if file is small and fits in the metadata request
+	trySpeedup := o.fs.opt.SpeedupEnable && size > mrhash.Size
+
+	// Try to get the hash if it's instant
+	if trySpeedup && !slowHash {
 		if srcHash, err := src.Hash(ctx, MrHashType); err == nil && srcHash != "" {
 			fileHash, _ = mrhash.DecodeString(srcHash)
 		}
-
-		// Try speedup if it's globally enabled and source hash is available.
-		trySpeedup = o.fs.opt.SpeedupEnable
-		if trySpeedup && fileHash != nil {
+		if fileHash != nil {
 			if o.putByHash(ctx, fileHash, src, "source") {
 				return nil
 			}
@@ -1622,13 +1642,22 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	// Need to calculate hash, check whether file is still eligible for speedup
-	if trySpeedup {
-		trySpeedup = o.fs.eligibleForSpeedup(o.Remote(), size, options...)
+	trySpeedup = trySpeedup && o.fs.eligibleForSpeedup(o.Remote(), size, options...)
+
+	// Attempt to put by hash if file is local and eligible
+	if trySpeedup && localSrc {
+		if srcHash, err := src.Hash(ctx, MrHashType); err == nil && srcHash != "" {
+			fileHash, _ = mrhash.DecodeString(srcHash)
+		}
+		if fileHash != nil && o.putByHash(ctx, fileHash, src, "localfs") {
+			return nil
+		}
+		// If local file hashing has failed, it's pointless to try anymore
+		trySpeedup = false
 	}
 
 	// Attempt to put by calculating hash in memory
 	if trySpeedup && size <= int64(o.fs.opt.SpeedupMaxMem) {
-		//fs.Debugf(o, "attempt to put by hash from memory")
 		fileBuf, err = ioutil.ReadAll(in)
 		if err != nil {
 			return err
@@ -1643,7 +1672,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 	// Attempt to put by hash using a spool file
 	if trySpeedup {
-		tmpFs, err := fs.TemporaryLocalFs()
+		tmpFs, err := fs.TemporaryLocalFs(ctx)
 		if err != nil {
 			fs.Infof(tmpFs, "Failed to create spool FS: %v", err)
 		} else {
@@ -1655,7 +1684,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 			spoolFile, mrHash, err := makeTempFile(ctx, tmpFs, wrapIn, src)
 			if err != nil {
-				return errors.Wrap(err, "Failed to create spool file")
+				return fmt.Errorf("Failed to create spool file: %w", err)
 			}
 			if o.putByHash(ctx, mrHash, src, "spool") {
 				// If put by hash is successful, ignore transitive error
@@ -1758,6 +1787,7 @@ func (f *Fs) parseSpeedupPatterns(patternString string) (err error) {
 	return nil
 }
 
+// putByHash is a thin wrapper around addFileMetaData
 func (o *Object) putByHash(ctx context.Context, mrHash []byte, info fs.ObjectInfo, method string) bool {
 	oNew := new(Object)
 	*oNew = *o
@@ -1861,30 +1891,30 @@ func (f *Fs) uploadShard(ctx context.Context) (string, error) {
 		return f.shardURL, nil
 	}
 
-	token, err := f.accessToken()
-	if err != nil {
-		return "", err
-	}
-
 	opts := rest.Opts{
-		Method: "GET",
-		Path:   "/api/m1/dispatcher",
-		Parameters: url.Values{
-			"client_id":    {api.OAuthClientID},
-			"access_token": {token},
-		},
+		RootURL: api.DispatchServerURL,
+		Method:  "GET",
+		Path:    "/u",
 	}
 
-	var info api.ShardInfoResponse
+	var (
+		res *http.Response
+		url string
+		err error
+	)
 	err = f.pacer.Call(func() (bool, error) {
-		res, err := f.srv.CallJSON(ctx, &opts, nil, &info)
-		return shouldRetry(res, err, f, &opts)
+		res, err = f.srv.Call(ctx, &opts)
+		if err == nil {
+			url, err = readBodyWord(res)
+		}
+		return fserrors.ShouldRetry(err), err
 	})
 	if err != nil {
+		closeBody(res)
 		return "", err
 	}
 
-	f.shardURL = info.Body.Upload[0].URL
+	f.shardURL = url
 	f.shardExpiry = time.Now().Add(shardExpirySec * time.Second)
 	fs.Debugf(f, "new upload shard: %s", f.shardURL)
 
@@ -1933,7 +1963,7 @@ func (o *Object) readMetaData(ctx context.Context, force bool) error {
 	}
 	newObj, ok := entry.(*Object)
 	if !ok || dirSize >= 0 {
-		return fs.ErrorNotAFile
+		return fs.ErrorIsDir
 	}
 	if newObj.remote != o.remote {
 		return fmt.Errorf("File %q path has changed to %q", o.remote, newObj.remote)
@@ -2054,7 +2084,7 @@ func (o *Object) addFileMetaData(ctx context.Context, overwrite bool) error {
 	var res *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		res, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(res, err, o.fs, &opts)
+		return shouldRetry(ctx, res, err, o.fs, &opts)
 	})
 	if err != nil {
 		closeBody(res)
@@ -2116,7 +2146,18 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return nil, err
 	}
 
-	start, end, partial := getTransferRange(o.size, options...)
+	start, end, partialRequest := getTransferRange(o.size, options...)
+
+	headers := map[string]string{
+		"Accept":       "*/*",
+		"Content-Type": "application/octet-stream",
+	}
+	if partialRequest {
+		rangeStr := fmt.Sprintf("bytes=%d-%d", start, end-1)
+		headers["Range"] = rangeStr
+		// headers["Content-Range"] = rangeStr
+		headers["Accept-Ranges"] = "bytes"
+	}
 
 	// TODO: set custom timeouts
 	opts := rest.Opts{
@@ -2127,10 +2168,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 			"client_id": {api.OAuthClientID},
 			"token":     {token},
 		},
-		ExtraHeaders: map[string]string{
-			"Accept": "*/*",
-			"Range":  fmt.Sprintf("bytes=%d-%d", start, end-1),
-		},
+		ExtraHeaders: headers,
 	}
 
 	var res *http.Response
@@ -2142,7 +2180,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		}
 		opts.RootURL = server
 		res, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(res, err, o.fs, &opts)
+		return shouldRetry(ctx, res, err, o.fs, &opts)
 	})
 	if err != nil {
 		if res != nil && res.Body != nil {
@@ -2151,17 +2189,36 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return nil, err
 	}
 
-	var hasher gohash.Hash
-	if !partial {
+	// Server should respond with Status 206 and Content-Range header to a range
+	// request. Status 200 (and no Content-Range) means a full-content response.
+	partialResponse := res.StatusCode == 206
+
+	var (
+		hasher     gohash.Hash
+		wrapStream io.ReadCloser
+	)
+	if !partialResponse {
 		// Cannot check hash of partial download
 		hasher = mrhash.New()
 	}
-	wrapStream := &endHandler{
+	wrapStream = &endHandler{
 		ctx:    ctx,
 		stream: res.Body,
 		hasher: hasher,
 		o:      o,
 		server: server,
+	}
+	if partialRequest && !partialResponse {
+		fs.Debugf(o, "Server returned full content instead of range")
+		if start > 0 {
+			// Discard the beginning of the data
+			_, err = io.CopyN(ioutil.Discard, wrapStream, start)
+			if err != nil {
+				closeBody(res)
+				return nil, err
+			}
+		}
+		wrapStream = readers.NewLimitedReadCloser(wrapStream, end-start)
 	}
 	return wrapStream, nil
 }
@@ -2215,7 +2272,7 @@ func (e *endHandler) handle(err error) error {
 	return io.EOF
 }
 
-// serverPool backs server dispacher
+// serverPool backs server dispatcher
 type serverPool struct {
 	pool      pendingServerMap
 	mu        sync.Mutex
@@ -2261,7 +2318,7 @@ func (p *serverPool) Dispatch(ctx context.Context, current string) (string, erro
 	})
 	if err != nil || url == "" {
 		closeBody(res)
-		return "", errors.Wrap(err, "Failed to request file server")
+		return "", fmt.Errorf("Failed to request file server: %w", err)
 	}
 
 	p.addServer(url, now)
@@ -2330,7 +2387,7 @@ func (p *serverPool) addServer(url string, now time.Time) {
 	expiry := now.Add(p.expirySec * time.Second)
 
 	expiryStr := []byte("-")
-	if fs.Config.LogLevel >= fs.LogLevelInfo {
+	if p.fs.ci.LogLevel >= fs.LogLevelInfo {
 		expiryStr, _ = expiry.MarshalJSON()
 	}
 

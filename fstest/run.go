@@ -44,6 +44,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/lib/file"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,6 +55,7 @@ type Run struct {
 	Flocal       fs.Fs
 	Fremote      fs.Fs
 	FremoteName  string
+	Precision    time.Duration
 	cleanRemote  func()
 	mkdir        map[string]bool // whether the remote has been made yet for the fs name
 	Logf, Fatalf func(text string, args ...interface{})
@@ -102,10 +104,13 @@ func newRun() *Run {
 		r.Fatalf("Failed to create temp dir: %v", err)
 	}
 	r.LocalName = filepath.ToSlash(r.LocalName)
-	r.Flocal, err = fs.NewFs(r.LocalName)
+	r.Flocal, err = fs.NewFs(context.Background(), r.LocalName)
 	if err != nil {
 		r.Fatalf("Failed to make %q: %v", r.LocalName, err)
 	}
+
+	r.Precision = fs.GetModifyWindow(context.Background(), r.Fremote, r.Flocal)
+
 	return r
 }
 
@@ -173,7 +178,7 @@ func newRunIndividual(t *testing.T, individual bool) *Run {
 	}
 	r.Logf = t.Logf
 	r.Fatalf = t.Fatalf
-	r.Logf("Remote %q, Local %q, Modify Window %q", r.Fremote, r.Flocal, fs.GetModifyWindow(r.Fremote))
+	r.Logf("Remote %q, Local %q, Modify Window %q", r.Fremote, r.Flocal, fs.GetModifyWindow(ctx, r.Fremote))
 	return r
 }
 
@@ -212,7 +217,7 @@ func (r *Run) WriteFile(filePath, content string, t time.Time) Item {
 	// FIXME make directories?
 	filePath = path.Join(r.LocalName, filePath)
 	dirPath := path.Dir(filePath)
-	err := os.MkdirAll(dirPath, 0770)
+	err := file.MkdirAll(dirPath, 0770)
 	if err != nil {
 		r.Fatalf("Failed to make directories %q: %v", dirPath, err)
 	}
@@ -254,7 +259,7 @@ func (r *Run) WriteObjectTo(ctx context.Context, f fs.Fs, remote, content string
 	}
 	r.Mkdir(ctx, f)
 
-	// caclulate all hashes f supports for content
+	// calculate all hashes f supports for content
 	hash, err := hash.NewMultiHasherTypes(f.Hashes())
 	if err != nil {
 		r.Fatalf("Failed to make new multi hasher: %v", err)
@@ -323,6 +328,38 @@ func (r *Run) CheckWithDuplicates(t *testing.T, items ...Item) {
 	sort.Strings(got)
 
 	assert.Equal(t, want, got)
+}
+
+// CheckLocalItems checks the local fs with proper precision
+// to see if it has the expected items.
+func (r *Run) CheckLocalItems(t *testing.T, items ...Item) {
+	CheckItemsWithPrecision(t, r.Flocal, r.Precision, items...)
+}
+
+// CheckRemoteItems checks the remote fs with proper precision
+// to see if it has the expected items.
+func (r *Run) CheckRemoteItems(t *testing.T, items ...Item) {
+	CheckItemsWithPrecision(t, r.Fremote, r.Precision, items...)
+}
+
+// CheckLocalListing checks the local fs with proper precision
+// to see if it has the expected contents.
+//
+// If expectedDirs is non nil then we check those too.  Note that no
+// directories returned is also OK as some remotes don't return
+// directories.
+func (r *Run) CheckLocalListing(t *testing.T, items []Item, expectedDirs []string) {
+	CheckListingWithPrecision(t, r.Flocal, items, expectedDirs, r.Precision)
+}
+
+// CheckRemoteListing checks the remote fs with proper precision
+// to see if it has the expected contents.
+//
+// If expectedDirs is non nil then we check those too.  Note that no
+// directories returned is also OK as some remotes don't return
+// directories.
+func (r *Run) CheckRemoteListing(t *testing.T, items []Item, expectedDirs []string) {
+	CheckListingWithPrecision(t, r.Fremote, items, expectedDirs, r.Precision)
 }
 
 // Clean the temporary directory

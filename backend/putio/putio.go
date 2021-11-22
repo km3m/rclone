@@ -1,7 +1,7 @@
 package putio
 
 import (
-	"log"
+	"context"
 	"regexp"
 	"time"
 
@@ -34,7 +34,7 @@ const (
 	minSleep                   = 10 * time.Millisecond
 	maxSleep                   = 2 * time.Second
 	decayConstant              = 2 // bigger for slower decay, exponential
-	defaultChunkSize           = 48 * fs.MebiByte
+	defaultChunkSize           = 48 * fs.Mebi
 )
 
 var (
@@ -59,14 +59,11 @@ func init() {
 		Name:        "putio",
 		Description: "Put.io",
 		NewFs:       NewFs,
-		Config: func(name string, m configmap.Mapper) {
-			opt := oauthutil.Options{
-				NoOffline: true,
-			}
-			err := oauthutil.Config("putio", name, m, putioConfig, &opt)
-			if err != nil {
-				log.Fatalf("Failed to configure token: %v", err)
-			}
+		Config: func(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
+			return oauthutil.ConfigOut("", &oauthutil.Options{
+				OAuth2Config: putioConfig,
+				NoOffline:    true,
+			})
 		},
 		Options: []fs.Option{{
 			Name:     config.ConfigEncoding,

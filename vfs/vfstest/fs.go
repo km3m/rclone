@@ -24,11 +24,16 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/file"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/rclone/rclone/vfs/vfsflags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	waitForWritersDelay = 30 * time.Second // time to wait for existing writers
 )
 
 var (
@@ -155,16 +160,13 @@ func findMountPath() string {
 	}
 
 	// Find a free drive letter
+	letter := file.FindUnusedDriveLetter()
 	drive := ""
-	for letter := 'E'; letter <= 'Z'; letter++ {
+	if letter == 0 {
+		log.Fatalf("Couldn't find free drive letter for test")
+	} else {
 		drive = string(letter) + ":"
-		_, err := os.Stat(drive + "\\")
-		if os.IsNotExist(err) {
-			goto found
-		}
 	}
-	log.Fatalf("Couldn't find free drive letter for test")
-found:
 	return drive
 }
 
@@ -229,7 +231,7 @@ func (r *Run) cacheMode(cacheMode vfscommon.CacheMode, writeBack time.Duration) 
 		return
 	}
 	// Wait for writers to finish
-	r.vfs.WaitForWriters(30 * time.Second)
+	r.vfs.WaitForWriters(waitForWritersDelay)
 	// Empty and remake the remote
 	r.cleanRemote()
 	err := r.fremote.Mkdir(context.Background(), "")
@@ -374,7 +376,7 @@ func (r *Run) checkDir(t *testing.T, dirString string) {
 
 // wait for any files being written to be released by fuse
 func (r *Run) waitForWriters() {
-	run.vfs.WaitForWriters(10 * time.Second)
+	run.vfs.WaitForWriters(waitForWritersDelay)
 }
 
 // writeFile writes data to a file named by filename.

@@ -44,6 +44,10 @@ with use of the "--addr" flag.
 
 You might wish to start this server on boot.
 
+Adding --cache-objects=false will cause rclone to stop caching objects
+returned from the List call. Caching is normally desirable as it speeds
+up downloading objects, saves transactions and uses very little memory.
+
 ## Setting up restic to use rclone ###
 
 Now you can [follow the restic
@@ -92,7 +96,7 @@ with a path of `/<username>/`.
 ## Server options
 
 Use --addr to specify which IP address and port the server should
-listen on, eg --addr 1.2.3.4:8000 or --addr :8080 to listen to all
+listen on, e.g. --addr 1.2.3.4:8000 or --addr :8080 to listen to all
 IPs.  By default it only listens on localhost.  You can use port
 :0 to let the OS choose an available port.
 
@@ -123,7 +127,7 @@ to be used within the template to server pages:
 | .Name       | The full path of a file/directory. |
 | .Title      | Directory listing of .Name |
 | .Sort       | The current sort used.  This is changeable via ?sort= parameter |
-|             | Sort Options: namedirfist,name,size,time (default namedirfirst) |
+|             | Sort Options: namedirfirst,name,size,time (default namedirfirst) |
 | .Order      | The current ordering used.  This is changeable via ?order= parameter |
 |             | Order Options: asc,desc (default asc) |
 | .Query      | Currently unused. |
@@ -178,23 +182,24 @@ rclone serve restic remote:path [flags]
 ## Options
 
 ```
-      --addr string                     IPaddress:Port or :Port to bind server to. (default "localhost:8080")
-      --append-only                     disallow deletion of repository data
-      --baseurl string                  Prefix for URLs - leave blank for root.
+      --addr string                     IPaddress:Port or :Port to bind server to (default "localhost:8080")
+      --append-only                     Disallow deletion of repository data
+      --baseurl string                  Prefix for URLs - leave blank for root
+      --cache-objects                   Cache listed objects (default true)
       --cert string                     SSL PEM key (concatenation of certificate and CA certificate)
       --client-ca string                Client certificate authority to verify clients with
   -h, --help                            help for restic
       --htpasswd string                 htpasswd file - if not provided no authentication is done
       --key string                      SSL PEM Private key
       --max-header-bytes int            Maximum size of request header (default 4096)
-      --pass string                     Password for authentication.
-      --private-repos                   users can only access their private repo
+      --pass string                     Password for authentication
+      --private-repos                   Users can only access their private repo
       --realm string                    realm for authentication (default "rclone")
       --server-read-timeout duration    Timeout for server reading data (default 1h0m0s)
       --server-write-timeout duration   Timeout for server writing data (default 1h0m0s)
-      --stdio                           run an HTTP2 server on stdin/stdout
-      --template string                 User Specified Template.
-      --user string                     User name for authentication.
+      --stdio                           Run an HTTP2 server on stdin/stdout
+      --template string                 User-specified template
+      --user string                     User name for authentication
 ```
 
 See the [global flags page](/flags/) for global options not listed here.

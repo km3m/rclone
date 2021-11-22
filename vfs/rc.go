@@ -2,12 +2,12 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/rc"
@@ -23,6 +23,8 @@ must be supplied.`
 //
 // If "fs" is not set and there is one and only one VFS in the active
 // cache then it returns it. This is for backwards compatibility.
+//
+// This deletes the "fs" parameter from in if it is valid
 func getVFS(in rc.Params) (vfs *VFS, err error) {
 	fsString, err := in.GetString("fs")
 	if rc.IsErrParamNotFound(err) {
@@ -42,10 +44,11 @@ func getVFS(in rc.Params) (vfs *VFS, err error) {
 	fsString = cache.Canonicalize(fsString)
 	activeVFS := active[fsString]
 	if len(activeVFS) == 0 {
-		return nil, errors.Errorf("no VFS found with name %q", fsString)
+		return nil, fmt.Errorf("no VFS found with name %q", fsString)
 	} else if len(activeVFS) > 1 {
-		return nil, errors.Errorf("more than one VFS active with name %q", fsString)
+		return nil, fmt.Errorf("more than one VFS active with name %q", fsString)
 	}
+	delete(in, "fs") // delete the fs parameter
 	return activeVFS[0], nil
 }
 
@@ -63,7 +66,7 @@ If no paths are passed in then it will refresh the root directory.
     rclone rc vfs/refresh
 
 Otherwise pass directories in as dir=path. Any parameter key
-starting with dir will refresh that directory, eg
+starting with dir will refresh that directory, e.g.
 
     rclone rc vfs/refresh dir=home/junk dir2=data/misc
 
@@ -108,11 +111,11 @@ func rcRefresh(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		if v, ok := in[k]; ok {
 			s, ok := v.(string)
 			if !ok {
-				return out, errors.Errorf("value must be string %q=%v", k, v)
+				return out, fmt.Errorf("value must be string %q=%v", k, v)
 			}
 			recursive, err = strconv.ParseBool(s)
 			if err != nil {
-				return out, errors.Errorf("invalid value %q=%v", k, v)
+				return out, fmt.Errorf("invalid value %q=%v", k, v)
 			}
 			delete(in, k)
 		}
@@ -134,7 +137,7 @@ func rcRefresh(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		for k, v := range in {
 			path, ok := v.(string)
 			if !ok {
-				return out, errors.Errorf("value must be string %q=%v", k, v)
+				return out, fmt.Errorf("value must be string %q=%v", k, v)
 			}
 			if strings.HasPrefix(k, "dir") {
 				dir, err := getDir(path)
@@ -153,7 +156,7 @@ func rcRefresh(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 					}
 				}
 			} else {
-				return out, errors.Errorf("unknown key %q", k)
+				return out, fmt.Errorf("unknown key %q", k)
 			}
 		}
 	}
@@ -180,7 +183,7 @@ directory cache.
 
 Otherwise pass files or dirs in as file=path or dir=path.  Any
 parameter key starting with file will forget that file and any
-starting with dir will forget that dir, eg
+starting with dir will forget that dir, e.g.
 
     rclone rc vfs/forget file=hello file2=goodbye dir=home/junk
 ` + getVFSHelp,
@@ -205,7 +208,7 @@ func rcForget(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		for k, v := range in {
 			path, ok := v.(string)
 			if !ok {
-				return out, errors.Errorf("value must be string %q=%v", k, v)
+				return out, fmt.Errorf("value must be string %q=%v", k, v)
 			}
 			path = strings.Trim(path, "/")
 			if strings.HasPrefix(k, "file") {
@@ -213,7 +216,7 @@ func rcForget(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 			} else if strings.HasPrefix(k, "dir") {
 				root.ForgetPath(path, fs.EntryDirectory)
 			} else {
-				return out, errors.Errorf("unknown key %q", k)
+				return out, fmt.Errorf("unknown key %q", k)
 			}
 			forgotten = append(forgotten, path)
 		}
@@ -227,11 +230,11 @@ func rcForget(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 func getDuration(k string, v interface{}) (time.Duration, error) {
 	s, ok := v.(string)
 	if !ok {
-		return 0, errors.Errorf("value must be string %q=%v", k, v)
+		return 0, fmt.Errorf("value must be string %q=%v", k, v)
 	}
 	interval, err := fs.ParseDuration(s)
 	if err != nil {
-		return 0, errors.Wrap(err, "parse duration")
+		return 0, fmt.Errorf("parse duration: %w", err)
 	}
 	return interval, nil
 }
@@ -269,7 +272,7 @@ func getTimeout(in rc.Params) (time.Duration, error) {
 
 func getStatus(vfs *VFS, in rc.Params) (out rc.Params, err error) {
 	for k, v := range in {
-		return nil, errors.Errorf("invalid parameter: %s=%s", k, v)
+		return nil, fmt.Errorf("invalid parameter: %s=%s", k, v)
 	}
 	return rc.Params{
 		"enabled":   vfs.Opt.PollInterval != 0,
@@ -326,7 +329,7 @@ func rcPollInterval(ctx context.Context, in rc.Params) (out rc.Params, err error
 		return nil, err
 	}
 	for k, v := range in {
-		return nil, errors.Errorf("invalid parameter: %s=%s", k, v)
+		return nil, fmt.Errorf("invalid parameter: %s=%s", k, v)
 	}
 	if vfs.pollChan == nil {
 		return nil, errors.New("poll-interval is not supported by this remote")

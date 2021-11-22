@@ -3,33 +3,64 @@ title: "Jottacloud"
 description: "Rclone docs for Jottacloud"
 ---
 
-{{< icon "fa fa-cloud" >}} Jottacloud
------------------------------------------
+# {{< icon "fa fa-cloud" >}} Jottacloud
 
-Jottacloud is a cloud storage service provider from a Norwegian company, using its own datacenters in Norway.
+Jottacloud is a cloud storage service provider from a Norwegian company, using its own datacenters
+in Norway. In addition to the official service at [jottacloud.com](https://www.jottacloud.com/),
+it also provides white-label solutions to different companies, such as:
+* Telia
+  * Telia Cloud (cloud.telia.se)
+  * Telia Sky (sky.telia.no)
+* Tele2
+  * Tele2 Cloud (mittcloud.tele2.se)
+* Elkjøp (with subsidiaries):
+  * Elkjøp Cloud (cloud.elkjop.no)
+  * Elgiganten Sweden (cloud.elgiganten.se)
+  * Elgiganten Denmark (cloud.elgiganten.dk)
+  * Giganti Cloud  (cloud.gigantti.fi)
+  * ELKO Clouud (cloud.elko.is)
 
-In addition to the official service at [jottacloud.com](https://www.jottacloud.com/), there are
-also several whitelabel versions which should work with this backend.
+Most of the white-label versions are supported by this backend, although may require different
+authentication setup - described below.
 
 Paths are specified as `remote:path`
 
-Paths may be as deep as required, eg `remote:directory/subdirectory`.
+Paths may be as deep as required, e.g. `remote:directory/subdirectory`.
 
-## Setup
+## Authentication types
 
-### Default Setup
+Some of the whitelabel versions uses a different authentication method than the official service,
+and you have to choose the correct one when setting up the remote.
+
+### Standard authentication
 
 To configure Jottacloud you will need to generate a personal security token in the Jottacloud web interface.
 You will the option to do in your [account security settings](https://www.jottacloud.com/web/secure)
 (for whitelabel version you need to find this page in its web interface).
 Note that the web interface may refer to this token as a JottaCli token.
 
-### Legacy Setup
+### Legacy authentication
 
-If you are using one of the whitelabel versions (Elgiganten, Com Hem Cloud) you may not have the option
-to generate a CLI token. In this case you'll have to use the legacy authentification. To to this select
-yes when the setup asks for legacy authentification and enter your username and password.
+If you are using one of the whitelabel versions (e.g. from Elkjøp) you may not have the option
+to generate a CLI token. In this case you'll have to use the legacy authentication. To do this select
+yes when the setup asks for legacy authentication and enter your username and password.
 The rest of the setup is identical to the default setup.
+
+### Telia Cloud authentication
+
+Similar to other whitelabel versions Telia Cloud doesn't offer the option of creating a CLI token, and
+additionally uses a separate authentication flow where the username is generated internally. To setup
+rclone to use Telia Cloud, choose Telia Cloud authentication in the setup. The rest of the setup is
+identical to the default setup.
+
+### Tele2 Cloud authentication
+
+As Tele2-Com Hem merger was completed this authentication can be used for former Com Hem Cloud and
+Tele2 Cloud customers as no support for creating a CLI token exists, and additionally uses a separate
+authentication flow where the username is generated internally. To setup rclone to use Tele2 Cloud,
+choose Tele2 Cloud authentication in the setup. The rest of the setup is identical to the default setup.
+
+## Configuration
 
 Here is an example of how to make a remote called `remote` with the default setup.  First run:
 
@@ -59,7 +90,7 @@ y) Yes
 n) No
 y/n> n
 Remote config
-Use legacy authentification?.
+Use legacy authentication?.
 This is only required for certain whitelabel versions of Jottacloud and not recommended for normal users.
 y) Yes
 n) No (default)
@@ -83,7 +114,7 @@ Choose a number from below, or type in an existing value
  1 > Archive
  2 > Links
  3 > Sync
- 
+
 Mountpoints> 1
 --------------------
 [jotta]
@@ -156,7 +187,7 @@ true for crypted remotes (in older versions the crypt backend would not
 calculate hashes for uploads from local disk, so the Jottacloud
 backend had to do it as described above).
 
-#### Restricted filename characters
+### Restricted filename characters
 
 In addition to the [default restricted characters set](/overview/#restricted-characters)
 the following characters are also replaced:
@@ -176,7 +207,7 @@ as they can't be used in XML strings.
 
 ### Deleting files
 
-By default rclone will send all files to the trash when deleting files. They will be permanently
+By default, rclone will send all files to the trash when deleting files. They will be permanently
 deleted automatically after 30 days. You may bypass the trash and permanently delete files immediately
 by using the [--jottacloud-hard-delete](#jottacloud-hard-delete) flag, or set the equivalent environment variable.
 Emptying the trash is supported by the [cleanup](/commands/rclone_cleanup/) command.
@@ -186,6 +217,9 @@ Emptying the trash is supported by the [cleanup](/commands/rclone_cleanup/) comm
 Jottacloud supports file versioning. When rclone uploads a new version of a file it creates a new version of it.
 Currently rclone only supports retrieving the current version but older versions can be accessed via the Jottacloud Website.
 
+Versioning can be disabled by `--jottacloud-no-versions` option. This is achieved by deleting the remote file prior to uploading
+a new version. If the upload the fails no version of the file will be available in the remote.
+
 ### Quota information
 
 To view your current quota you can use the `rclone about remote:`
@@ -193,7 +227,7 @@ command which will display your usage limit (unless it is unlimited)
 and the current usage.
 
 {{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/jottacloud/jottacloud.go then run make backenddocs" >}}
-### Advanced Options
+### Advanced options
 
 Here are the advanced options specific to jottacloud (Jottacloud).
 
@@ -204,11 +238,12 @@ Files bigger than this will be cached on disk to calculate the MD5 if required.
 - Config:      md5_memory_limit
 - Env Var:     RCLONE_JOTTACLOUD_MD5_MEMORY_LIMIT
 - Type:        SizeSuffix
-- Default:     10M
+- Default:     10Mi
 
 #### --jottacloud-trashed-only
 
 Only show files that are in the trash.
+
 This will show trashed files in their original directory structure.
 
 - Config:      trashed_only
@@ -232,13 +267,22 @@ Files bigger than this can be resumed if the upload fail's.
 - Config:      upload_resume_limit
 - Env Var:     RCLONE_JOTTACLOUD_UPLOAD_RESUME_LIMIT
 - Type:        SizeSuffix
-- Default:     10M
+- Default:     10Mi
+
+#### --jottacloud-no-versions
+
+Avoid server side versioning by deleting files and recreating files instead of overwriting them.
+
+- Config:      no_versions
+- Env Var:     RCLONE_JOTTACLOUD_NO_VERSIONS
+- Type:        bool
+- Default:     false
 
 #### --jottacloud-encoding
 
 This sets the encoding for the backend.
 
-See: the [encoding section in the overview](/overview/#encoding) for more info.
+See the [encoding section in the overview](/overview/#encoding) for more info.
 
 - Config:      encoding
 - Env Var:     RCLONE_JOTTACLOUD_ENCODING
@@ -247,7 +291,7 @@ See: the [encoding section in the overview](/overview/#encoding) for more info.
 
 {{< rem autogenerated options stop >}}
 
-### Limitations
+## Limitations
 
 Note that Jottacloud is case insensitive so you can't have a file called
 "Hello.doc" and one called "hello.doc".
@@ -257,7 +301,7 @@ looking unicode equivalent. For example if a file has a ? in it will be mapped t
 
 Jottacloud only supports filenames up to 255 characters in length.
 
-### Troubleshooting
+## Troubleshooting
 
 Jottacloud exhibits some inconsistent behaviours regarding deleted files and folders which may cause Copy, Move and DirMove
 operations to previously deleted paths to fail. Emptying the trash should help in such cases.

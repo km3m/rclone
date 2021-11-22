@@ -14,7 +14,7 @@
 //
 // The vfs package returns Error values to signal precisely which
 // error conditions have ocurred.  It may also return general errors
-// it receives.  It tries to use os Error values (eg os.ErrExist)
+// it receives.  It tries to use os Error values (e.g. os.ErrExist)
 // where possible.
 
 //go:generate sh -c "go run make_open_tests.go | gofmt > open_test.go"
@@ -36,6 +36,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/log"
+	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/vfs/vfscache"
 	"github.com/rclone/rclone/vfs/vfscommon"
 )
@@ -108,7 +109,7 @@ type OsFiler interface {
 	WriteString(s string) (n int, err error)
 }
 
-// Handle is the interface statisified by open files or directories.
+// Handle is the interface satisfied by open files or directories.
 // It is the methods on *os.File, plus a few more useful for FUSE
 // filingsystems.  Not all of them are supported.
 type Handle interface {
@@ -221,7 +222,7 @@ func New(f fs.Fs, opt *vfscommon.Options) *VFS {
 		vfs.pollChan = make(chan time.Duration)
 		do(context.TODO(), vfs.root.changeNotify, vfs.pollChan)
 		vfs.pollChan <- vfs.Opt.PollInterval
-	} else {
+	} else if vfs.Opt.PollInterval > 0 {
 		fs.Infof(f, "poll-interval is not supported by this remote")
 	}
 
@@ -542,7 +543,7 @@ func fillInMissingSizes(total, used, free, unknownFree int64) (newTotal, newUsed
 	return total, used, free
 }
 
-// If the total size isn't known then we will aim for this many bytes free (1PB)
+// If the total size isn't known then we will aim for this many bytes free (1 PiB)
 const unknownFreeBytes = 1 << 50
 
 // Statfs returns into about the filing system if known
@@ -556,9 +557,25 @@ func (vfs *VFS) Statfs() (total, used, free int64) {
 	defer vfs.usageMu.Unlock()
 	total, used, free = -1, -1, -1
 	doAbout := vfs.f.Features().About
-	if doAbout != nil && (vfs.usageTime.IsZero() || time.Since(vfs.usageTime) >= vfs.Opt.DirCacheTime) {
+	if (doAbout != nil || vfs.Opt.UsedIsSize) && (vfs.usageTime.IsZero() || time.Since(vfs.usageTime) >= vfs.Opt.DirCacheTime) {
 		var err error
-		vfs.usage, err = doAbout(context.TODO())
+		ctx := context.TODO()
+		if doAbout == nil {
+			vfs.usage = &fs.Usage{}
+		} else {
+			vfs.usage, err = doAbout(ctx)
+		}
+		if vfs.Opt.UsedIsSize {
+			var usedBySizeAlgorithm int64
+			// Algorithm from `rclone size`
+			err = walk.ListR(ctx, vfs.f, "", true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
+				entries.ForObject(func(o fs.Object) {
+					usedBySizeAlgorithm += o.Size()
+				})
+				return nil
+			})
+			vfs.usage.Used = &usedBySizeAlgorithm
+		}
 		vfs.usageTime = time.Now()
 		if err != nil {
 			fs.Errorf(vfs.f, "Statfs failed: %v", err)

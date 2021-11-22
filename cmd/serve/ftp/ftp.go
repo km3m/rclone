@@ -1,10 +1,13 @@
 // Package ftp implements an FTP server for rclone
 
-//+build !plan9,go1.13
+//go:build !plan9
+// +build !plan9
 
 package ftp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,8 +15,8 @@ import (
 	"os/user"
 	"strconv"
 	"sync"
+	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/cmd/serve/proxy"
 	"github.com/rclone/rclone/cmd/serve/proxy/proxyflags"
@@ -37,6 +40,8 @@ type Options struct {
 	PassivePorts string // Passive ports range
 	BasicUser    string // single username for basic auth if not using Htpasswd
 	BasicPass    string // password for BasicUser
+	TLSCert      string // TLS PEM key (concatenation of certificate and CA certificate)
+	TLSKey       string // TLS PEM Private key
 }
 
 // DefaultOpt is the default values used for Options
@@ -54,11 +59,13 @@ var Opt = DefaultOpt
 // AddFlags adds flags for ftp
 func AddFlags(flagSet *pflag.FlagSet) {
 	rc.AddOption("ftp", &Opt)
-	flags.StringVarP(flagSet, &Opt.ListenAddr, "addr", "", Opt.ListenAddr, "IPaddress:Port or :Port to bind server to.")
-	flags.StringVarP(flagSet, &Opt.PublicIP, "public-ip", "", Opt.PublicIP, "Public IP address to advertise for passive connections.")
-	flags.StringVarP(flagSet, &Opt.PassivePorts, "passive-port", "", Opt.PassivePorts, "Passive port range to use.")
-	flags.StringVarP(flagSet, &Opt.BasicUser, "user", "", Opt.BasicUser, "User name for authentication.")
-	flags.StringVarP(flagSet, &Opt.BasicPass, "pass", "", Opt.BasicPass, "Password for authentication. (empty value allow every password)")
+	flags.StringVarP(flagSet, &Opt.ListenAddr, "addr", "", Opt.ListenAddr, "IPaddress:Port or :Port to bind server to")
+	flags.StringVarP(flagSet, &Opt.PublicIP, "public-ip", "", Opt.PublicIP, "Public IP address to advertise for passive connections")
+	flags.StringVarP(flagSet, &Opt.PassivePorts, "passive-port", "", Opt.PassivePorts, "Passive port range to use")
+	flags.StringVarP(flagSet, &Opt.BasicUser, "user", "", Opt.BasicUser, "User name for authentication")
+	flags.StringVarP(flagSet, &Opt.BasicPass, "pass", "", Opt.BasicPass, "Password for authentication (empty value allow every password)")
+	flags.StringVarP(flagSet, &Opt.TLSCert, "cert", "", Opt.TLSCert, "TLS PEM key (concatenation of certificate and CA certificate)")
+	flags.StringVarP(flagSet, &Opt.TLSKey, "key", "", Opt.TLSKey, "TLS PEM Private key")
 }
 
 func init() {
@@ -79,7 +86,7 @@ or you can make a remote of type ftp to read and write it.
 ### Server options
 
 Use --addr to specify which IP address and port the server should
-listen on, eg --addr 1.2.3.4:8000 or --addr :8080 to listen to all
+listen on, e.g. --addr 1.2.3.4:8000 or --addr :8080 to listen to all
 IPs.  By default it only listens on localhost.  You can use port
 :0 to let the OS choose an available port.
 
@@ -101,7 +108,7 @@ You can set a single username and password with the --user and --pass flags.
 			cmd.CheckArgs(0, 0, command, args)
 		}
 		cmd.Run(false, false, command, func() error {
-			s, err := newServer(f, &Opt)
+			s, err := newServer(context.Background(), f, &Opt)
 			if err != nil {
 				return err
 			}
@@ -112,15 +119,17 @@ You can set a single username and password with the --user and --pass flags.
 
 // server contains everything to run the server
 type server struct {
-	f     fs.Fs
-	srv   *ftp.Server
-	opt   Options
-	vfs   *vfs.VFS
-	proxy *proxy.Proxy
+	f      fs.Fs
+	srv    *ftp.Server
+	ctx    context.Context // for global config
+	opt    Options
+	vfs    *vfs.VFS
+	proxy  *proxy.Proxy
+	useTLS bool
 }
 
 // Make a new FTP to serve the remote
-func newServer(f fs.Fs, opt *Options) (*server, error) {
+func newServer(ctx context.Context, f fs.Fs, opt *Options) (*server, error) {
 	host, port, err := net.SplitHostPort(opt.ListenAddr)
 	if err != nil {
 		return nil, errors.New("Failed to parse host:port")
@@ -132,13 +141,15 @@ func newServer(f fs.Fs, opt *Options) (*server, error) {
 
 	s := &server{
 		f:   f,
+		ctx: ctx,
 		opt: *opt,
 	}
 	if proxyflags.Opt.AuthProxy != "" {
-		s.proxy = proxy.New(&proxyflags.Opt)
+		s.proxy = proxy.New(ctx, &proxyflags.Opt)
 	} else {
 		s.vfs = vfs.New(f, &vfsflags.Opt)
 	}
+	s.useTLS = s.opt.TLSKey != ""
 
 	ftpopt := &ftp.ServerOpts{
 		Name:           "Rclone FTP Server",
@@ -150,6 +161,9 @@ func newServer(f fs.Fs, opt *Options) (*server, error) {
 		PassivePorts:   opt.PassivePorts,
 		Auth:           s, // implemented by CheckPasswd method
 		Logger:         &Logger{},
+		TLS:            s.useTLS,
+		CertFile:       s.opt.TLSCert,
+		KeyFile:        s.opt.TLSKey,
 		//TODO implement a maximum of https://godoc.org/goftp.io/server#ServerOpts
 	}
 	s.srv = ftp.NewServer(ftpopt)
@@ -291,7 +305,7 @@ func (d *Driver) ListDir(path string, callback func(ftp.FileInfo) error) (err er
 	// Account the transfer
 	tr := accounting.GlobalStats().NewTransferRemoteSize(path, node.Size())
 	defer func() {
-		tr.Done(err)
+		tr.Done(d.s.ctx, err)
 	}()
 
 	for _, file := range dirEntries {
@@ -389,7 +403,7 @@ func (d *Driver) GetFile(path string, offset int64) (size int64, fr io.ReadClose
 
 	// Account the transfer
 	tr := accounting.GlobalStats().NewTransferRemoteSize(path, node.Size())
-	defer tr.Done(nil)
+	defer tr.Done(d.s.ctx, nil)
 
 	return node.Size(), handle, nil
 }
@@ -488,6 +502,11 @@ func (f *FileInfo) Group() string {
 		return str //Group not found default to numerical value
 	}
 	return g.Name
+}
+
+// ModTime returns the time in UTC
+func (f *FileInfo) ModTime() time.Time {
+	return f.FileInfo.ModTime().UTC()
 }
 
 func closeIO(path string, c io.Closer) {

@@ -3,15 +3,16 @@ title: "Memory"
 description: "Rclone docs for Memory backend"
 ---
 
-{{< icon "fas fa-memory" >}} Memory
------------------------------------------
+# {{< icon "fas fa-memory" >}} Memory
 
 The memory backend is an in RAM backend. It does not persist its
 data - use the local backend for that.
 
-The memory backend behaves like a bucket based remote (eg like
+The memory backend behaves like a bucket-based remote (e.g. like
 s3). Because it has no parameters you can just use it with the
 `:memory:` remote name.
+
+## Configuration
 
 You can configure it as a remote like this with `rclone config` too if
 you want to:
@@ -46,17 +47,17 @@ y/e/d> y
 ```
 
 Because the memory backend isn't persistent it is most useful for
-testing or with an rclone server or rclone mount, eg
+testing or with an rclone server or rclone mount, e.g.
 
     rclone mount :memory: /mnt/tmp
     rclone serve webdav :memory:
     rclone serve sftp :memory:
 
-### Modified time and hashes ###
+### Modified time and hashes
 
 The memory backend supports MD5 hashes and modification times accurate to 1 nS.
 
-#### Restricted filename characters
+### Restricted filename characters
 
 The memory backend replaces the [default restricted characters
 set](/overview/#restricted-characters).

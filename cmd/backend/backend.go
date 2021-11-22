@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/cmd/rc"
 	"github.com/rclone/rclone/fs"
@@ -24,15 +23,15 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.StringArrayVarP(cmdFlags, &options, "option", "o", options, "Option in the form name=value or name.")
-	flags.BoolVarP(cmdFlags, &useJSON, "json", "", useJSON, "Always output in JSON format.")
+	flags.StringArrayVarP(cmdFlags, &options, "option", "o", options, "Option in the form name=value or name")
+	flags.BoolVarP(cmdFlags, &useJSON, "json", "", useJSON, "Always output in JSON format")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "backend <command> remote:path [opts] <args>",
-	Short: `Run a backend specific command.`,
+	Short: `Run a backend-specific command.`,
 	Long: `
-This runs a backend specific command. The commands themselves (except
+This runs a backend-specific command. The commands themselves (except
 for "help" and "features") are defined by the backends and you should
 see the backend docs for definitions.
 
@@ -47,7 +46,7 @@ for more info).
 
     rclone backend features remote:
 
-Pass options to the backend command with -o. This should be key=value or key, eg:
+Pass options to the backend command with -o. This should be key=value or key, e.g.:
 
     rclone backend stats remote:path stats -o format=json -o long
 
@@ -74,7 +73,7 @@ Note to run these commands on a running backend then see
 			if err != nil {
 				return err
 			}
-			f, err := fsInfo.NewFs(configName, fsPath, config)
+			f, err := fsInfo.NewFs(context.Background(), configName, fsPath, config)
 			if err != nil {
 				return err
 			}
@@ -88,14 +87,14 @@ Note to run these commands on a running backend then see
 			default:
 				doCommand := f.Features().Command
 				if doCommand == nil {
-					return errors.Errorf("%v: doesn't support backend commands", f)
+					return fmt.Errorf("%v: doesn't support backend commands", f)
 				}
 				arg := args[2:]
 				opt := rc.ParseOptions(options)
 				out, err = doCommand(context.Background(), name, arg, opt)
 			}
 			if err != nil {
-				return errors.Wrapf(err, "command %q failed", name)
+				return fmt.Errorf("command %q failed: %w", name, err)
 
 			}
 			// Output the result
@@ -121,7 +120,7 @@ Note to run these commands on a running backend then see
 				enc.SetIndent("", "\t")
 				err = enc.Encode(out)
 				if err != nil {
-					return errors.Wrap(err, "failed to write JSON")
+					return fmt.Errorf("failed to write JSON: %w", err)
 				}
 			}
 			return nil
@@ -135,9 +134,9 @@ func showHelp(fsInfo *fs.RegInfo) error {
 	cmds := fsInfo.CommandHelp
 	name := fsInfo.Name
 	if len(cmds) == 0 {
-		return errors.Errorf("%s backend has no commands", name)
+		return fmt.Errorf("%s backend has no commands", name)
 	}
-	fmt.Printf("### Backend commands\n\n")
+	fmt.Printf("## Backend commands\n\n")
 	fmt.Printf(`Here are the commands specific to the %s backend.
 
 Run them with
@@ -154,7 +153,7 @@ These can be run on a running backend using the rc command
 
 `, name)
 	for _, cmd := range cmds {
-		fmt.Printf("#### %s\n\n", cmd.Name)
+		fmt.Printf("### %s\n\n", cmd.Name)
 		fmt.Printf("%s\n\n", cmd.Short)
 		fmt.Printf("    rclone backend %s remote: [options] [<arguments>+]\n\n", cmd.Name)
 		if cmd.Long != "" {

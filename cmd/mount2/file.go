@@ -1,3 +1,4 @@
+//go:build linux || (darwin && amd64)
 // +build linux darwin,amd64
 
 package mount2
@@ -45,7 +46,7 @@ func newFileHandle(h vfs.Handle, fsys *FS) *FileHandle {
 	}
 }
 
-// Check interface satistfied
+// Check interface satisfied
 var _ fusefs.FileHandle = (*FileHandle)(nil)
 
 // The String method is for debug printing.

@@ -41,11 +41,11 @@ may be repeated). If --hash-type is set then it implies --hash.
 
 If --no-modtime is specified then ModTime will be blank. This can
 speed things up on remotes where reading the ModTime takes an extra
-request (eg s3, swift).
+request (e.g. s3, swift).
 
 If --no-mimetype is specified then MimeType will be blank. This can
 speed things up on remotes where reading the MimeType takes an extra
-request (eg s3, swift).
+request (e.g. s3, swift).
 
 If --encrypted is not specified the Encrypted won't be emitted.
 
@@ -54,6 +54,12 @@ returned
 
 If --files-only is not specified directories in addition to the files
 will be returned.
+
+if --stat is set then a single JSON blob will be returned about the
+item pointed to. This will return an error if the item isn't found.
+However on bucket based backends (like s3, gcs, b2, azureblob etc) if
+the item isn't found it will return an empty directory as it isn't
+possible to tell empty directories from missing directories there.
 
 The Path field will only show folders below the remote path being listed.
 If "remote:path" contains the file "subfolder/file.txt", the Path for "file.txt"
@@ -67,9 +73,9 @@ If the directory is a bucket in a bucket based backend, then
 The time is in RFC3339 format with up to nanosecond precision.  The
 number of decimal digits in the seconds will depend on the precision
 that the remote can hold the times, so if times are accurate to the
-nearest millisecond (eg Google Drive) then 3 digits will always be
+nearest millisecond (e.g. Google Drive) then 3 digits will always be
 shown ("2017-05-31T16:15:57.034+01:00") whereas if the times are
-accurate to the nearest second (Dropbox, Box, WebDav etc) no digits
+accurate to the nearest second (Dropbox, Box, WebDav, etc.) no digits
 will be shown ("2017-05-31T16:15:57+01:00").
 
 The whole output can be processed as a JSON blob, or alternatively it
@@ -89,12 +95,12 @@ There are several related list commands
 `lsf` is designed to be human and machine readable.
 `lsjson` is designed to be machine readable.
 
-Note that `ls` and `lsl` recurse by default - use "--max-depth 1" to stop the recursion.
+Note that `ls` and `lsl` recurse by default - use `--max-depth 1` to stop the recursion.
 
-The other list commands `lsd`,`lsf`,`lsjson` do not recurse by default - use "-R" to make them recurse.
+The other list commands `lsd`,`lsf`,`lsjson` do not recurse by default - use `-R` to make them recurse.
 
 Listing a non existent directory will produce an error except for
-remotes which can't have empty directories (eg s3, swift, gcs, etc -
+remotes which can't have empty directories (e.g. s3, swift, or gcs -
 the bucket based remotes).
 
 
@@ -105,16 +111,17 @@ rclone lsjson remote:path [flags]
 ## Options
 
 ```
-      --dirs-only               Show only directories in the listing.
-  -M, --encrypted               Show the encrypted names.
-      --files-only              Show only files in the listing.
-      --hash                    Include hashes in the output (may take longer).
-      --hash-type stringArray   Show only this hash type (may be repeated).
+      --dirs-only               Show only directories in the listing
+  -M, --encrypted               Show the encrypted names
+      --files-only              Show only files in the listing
+      --hash                    Include hashes in the output (may take longer)
+      --hash-type stringArray   Show only this hash type (may be repeated)
   -h, --help                    help for lsjson
-      --no-mimetype             Don't read the mime type (can speed things up).
-      --no-modtime              Don't read the modification time (can speed things up).
-      --original                Show the ID of the underlying Object.
-  -R, --recursive               Recurse into the listing.
+      --no-mimetype             Don't read the mime type (can speed things up)
+      --no-modtime              Don't read the modification time (can speed things up)
+      --original                Show the ID of the underlying Object
+  -R, --recursive               Recurse into the listing
+      --stat                    Just return the info for the pointed to file
 ```
 
 See the [global flags page](/flags/) for global options not listed here.
